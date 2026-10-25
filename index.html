@@ -1388,6 +1388,72 @@ function genYouthPlayer(club, league){
   player.value = marketValue(player);
   return player;
 }
+/* camada: cada pretemporada llegan 4 a 6 chicos a las inferiores de tu club; elegís a quiénes sumar.
+   A veces viene una joya (más seguido con un buen director de juveniles). Los que no sumás se van. */
+var YOUTH_CAP_MINE = 8;
+function makeYouthIntake(club, league){
+  var lvl = staffLevel(club,'youth');
+  var n = 4 + (lvl>=4? 1 : 0) + rnd(0,1), list = [];
+  for(var i=0; i<n; i++){
+    var yp = genYouthPlayer({tier:club.tier, players:club.players, youthPlayers:(club.youthPlayers||[]).concat(list), staff:club.staff}, league);
+    list.push(yp);
+  }
+  if(Math.random() < 0.15+lvl*0.05){
+    var gem = list[rnd(0,list.length-1)];
+    gem.potential = clamp(gem.potential+rnd(6,12), overall(gem), 99);
+    gem.gem = true;
+    gem.value = marketValue(gem);
+  }
+  return {season:state.season+1, players:list};
+}
+function youthIntakePending(){
+  return !!(state && state.youthIntake && state.youthIntake.players && state.youthIntake.players.length && getMyClub());
+}
+function newsYouthIntake(club){
+  var it = state.youthIntake;
+  if(!it || !it.players.length) return;
+  var best = it.players.slice().sort(function(a,b){ return b.potential-a.potential; })[0];
+  var gem = it.players.find(function(p){ return p.gem; });
+  pushNews({kind:'club', clubId:club.id, playerId:best.id,
+    headline: 'LLEGÓ LA CAMADA '+it.season+' A LAS INFERIORES DEL '+club.name.toUpperCase(),
+    body: it.players.length+' chicos se suman a la prueba. '+(gem? 'En el club hablan maravillas de '+gem.name+' ('+gem.pos+', '+gem.age+' años): dicen que es una joya. ' : 'El de más proyección es '+best.name+' ('+best.pos+', potencial '+best.potential+'). ')+'Tenés que decidir a quiénes sumar a la cantera.',
+    tags:[club.name, 'Juveniles']});
+}
+function intakeSign(playerId){
+  var club = getMyClub(), it = state.youthIntake;
+  if(!club || !it) return {ok:false, msg:'No hay camada pendiente.'};
+  var idx = it.players.findIndex(function(p){ return p.id===playerId; });
+  if(idx===-1) return {ok:false, msg:'Ese chico ya no está en la prueba.'};
+  if((club.youthPlayers||[]).length>=YOUTH_CAP_MINE) return {ok:false, msg:'La cantera está llena ('+YOUTH_CAP_MINE+'). Promové o dejá libre a alguno primero.'};
+  var p = it.players.splice(idx,1)[0];
+  club.youthPlayers.push(p);
+  return {ok:true, msg:p.name+' se suma a la cantera.'};
+}
+function intakePass(playerId){
+  var it = state.youthIntake;
+  if(!it) return;
+  it.players = it.players.filter(function(p){ return p.id!==playerId; });
+}
+function intakeSignBest(){
+  var club = getMyClub(), it = state.youthIntake;
+  if(!club || !it) return {ok:false, msg:'No hay camada pendiente.'};
+  var room = YOUTH_CAP_MINE - (club.youthPlayers||[]).length, signed = [];
+  it.players.slice().sort(function(a,b){ return b.potential-a.potential; }).forEach(function(p){
+    if(room<=0) return;
+    room--; signed.push(p.name);
+    club.youthPlayers.push(p);
+  });
+  it.players = [];
+  return {ok:true, msg: signed.length? 'Sumaste a la cantera a '+signed.join(', ')+'.' : 'La cantera está llena: no entró nadie.'};
+}
+function releaseYouth(playerId){
+  var club = getMyClub();
+  if(!club) return {ok:false, msg:'No dirigís ningún club.'};
+  var idx = (club.youthPlayers||[]).findIndex(function(p){ return p.id===playerId; });
+  if(idx===-1) return {ok:false, msg:'No se encontró a ese juvenil.'};
+  var p = club.youthPlayers.splice(idx,1)[0];
+  return {ok:true, msg:p.name+' deja las inferiores del club.'};
+}
 function newsYouth(club, p){
   pushNews({kind:'club', clubId:club.id, playerId:p.id,
     headline: 'EL '+club.name.toUpperCase()+' SUBE A '+String(p.name).split(' ').pop().toUpperCase()+' AL PRIMER EQUIPO',
@@ -3366,8 +3432,13 @@ function rolloverSeason(){
       }
     });
     var youthCap = 6;
-    var newYouthCount = clamp(rnd(1,3), 0, Math.max(0, youthCap-keptYouth.length));
-    for(var yni=0; yni<newYouthCount; yni++) keptYouth.push(genYouthPlayer({tier:club.tier, players:survivors, youthPlayers:keptYouth, staff:club.staff}, league));
+    if(myClub && club.id===myClub.id){
+      // tu club: llega una camada entera y elegís a quién te quedás (ver Juveniles)
+      state.youthIntake = makeYouthIntake({tier:club.tier, players:survivors, youthPlayers:keptYouth, staff:club.staff}, league);
+    } else {
+      var newYouthCount = clamp(rnd(1,3), 0, Math.max(0, youthCap-keptYouth.length));
+      for(var yni=0; yni<newYouthCount; yni++) keptYouth.push(genYouthPlayer({tier:club.tier, players:survivors, youthPlayers:keptYouth, staff:club.staff}, league));
+    }
     club.youthPlayers = keptYouth;
 
     while(survivors.length<18){
@@ -3403,6 +3474,8 @@ function rolloverSeason(){
   if(myClub) state.manager.boardObjective = computeBoardObjective(myClub);
   state.manager.promisesUsed = 0;
   state.manager.ultimatum = null;
+  if(myClub && state.youthIntake && state.youthIntake.season===state.season) newsYouthIntake(myClub);
+  else state.youthIntake = null;
   setupCups(posMap);
 }
 
@@ -3689,7 +3762,12 @@ function contractRecsFor(club){
         action:'grant-raise', id:p.id, label:'Darle el aumento', order:3, sort:-ov+100});
     }
   });
-  return out.sort(function(a,b){ return a.sort-b.sort; }).slice(0,5);
+  out = out.sort(function(a,b){ return a.sort-b.sort; }).slice(0,5);
+  if(youthIntakePending()){
+    var it = state.youthIntake, gem = it.players.find(function(p){ return p.gem; });
+    out.push({group:'cantera', manual:true, text:'Llegó la camada '+it.season+': '+it.players.length+' chicos a prueba'+(gem? ', y uno viene con fama de joya' : '')+'. Elegí a quiénes sumar a la cantera.', action:'nav', id:'juveniles', label:'Ver la camada', order:3});
+  }
+  return out;
 }
 function autoAssistCount(recs){ return recs.list.filter(function(r){ return !r.manual; }).length; }
 function applyAssistRec(club, r){
@@ -3719,7 +3797,8 @@ function assistantOverlayHTML(recs){
     ? (nAuto? '<div class="card-actions" style="margin-top:8px;"><button class="btn btn-primary" data-action="assist-apply-all" type="button">Aplicar todo ('+nAuto+')</button></div>' : '')+
       (rivalRows? '<p class="assist-group">Para el partido contra '+escapeHtml(recs.opp.name)+'</p>'+rivalRows : '')+
       (squadRows? '<p class="assist-group">Según tu plantel</p>'+squadRows : '')+
-      (contractRows? '<p class="assist-group">Contratos (cuestan plata: decidís vos uno por uno)</p>'+contractRows : '')
+      (contractRows? '<p class="assist-group">Contratos (cuestan plata: decidís vos uno por uno)</p>'+contractRows : '')+
+      (rows('cantera')? '<p class="assist-group">Inferiores</p>'+rows('cantera') : '')
     : '<p class="feature-line" style="margin-top:10px;">Está todo como lo armaría tu asistente. Podés jugar tranquilo.</p>';
   return '<div class="overlay-backdrop" data-action="close-assistant">'+
     '<div class="overlay-panel" data-action="noop">'+
@@ -5017,6 +5096,7 @@ function appShellHTML(){
       var badge = '';
       if(pair[0]==='noticias' && unreadNews()) badge = ' <span class="tab-badge is-count">'+unreadNews()+'</span>';
       else if(pair[0]==='carrera' && (state.jobOffers.length || state.manager.ultimatum)) badge = ' <span class="tab-badge">•</span>';
+      else if(pair[0]==='juveniles' && youthIntakePending()) badge = ' <span class="tab-badge">•</span>';
       else if(pair[0]==='vestuario' && myClub && computeHierarchy(myClub).some(function(h){return h.tier==='discontent' && !h.player.transferListed;})) badge = ' <span class="tab-badge">•</span>';
       return '<button class="side-tab '+(currentView===pair[0]?'is-active':'')+'" data-action="nav" data-id="'+pair[0]+'" type="button"><span>'+pair[1]+'</span>'+badge+'</button>';
     }).join('');
@@ -5554,12 +5634,25 @@ function renderJuveniles(){
   var youth = myClub.staff.youth;
   var rows = (myClub.youthPlayers||[]).slice().sort(function(a,b){return overall(b)-overall(a);}).map(function(p){
     var ready = p.age>=17;
-    return '<tr><td>'+escapeHtml(p.name)+'</td><td><span class="pos-chip pos-'+p.pos+'">'+p.pos+'</span></td><td class="num">'+p.age+'</td>'+
+    return '<tr><td>'+escapeHtml(p.name)+(p.gem? ' <span class="rating-badge is-great">Joya</span>' : '')+'</td><td><span class="pos-chip pos-'+p.pos+'">'+p.pos+'</span></td><td class="num">'+p.age+'</td>'+
       '<td class="num mono">'+overall(p)+'</td><td class="num mono">'+p.potential+'</td>'+
       '<td>'+(ready? '<span class="rating-badge is-good">Listo</span>' : '<span class="rating-badge is-avg">En desarrollo</span>')+'</td>'+
-      '<td><button class="btn btn-sm btn-primary" data-action="promote-youth" data-id="'+p.id+'" type="button">Promover</button></td></tr>';
+      '<td style="display:flex; gap:6px;"><button class="btn btn-sm btn-primary" data-action="promote-youth" data-id="'+p.id+'" type="button">Promover</button><button class="btn btn-sm btn-ghost" data-action="release-youth" data-id="'+p.id+'" type="button">Dejar libre</button></td></tr>';
   }).join('');
-  return '<div class="view-grid">'+
+  var intakeCard = '';
+  if(youthIntakePending()){
+    var it = state.youthIntake, room = YOUTH_CAP_MINE-(myClub.youthPlayers||[]).length;
+    var iRows = it.players.slice().sort(function(a,b){ return b.potential-a.potential; }).map(function(p){
+      return '<tr><td>'+escapeHtml(p.name)+(p.gem? ' <span class="rating-badge is-great">Joya</span>' : '')+'</td><td><span class="pos-chip pos-'+p.pos+'">'+p.pos+'</span></td><td class="num">'+p.age+'</td>'+
+        '<td class="num mono">'+overall(p)+'</td><td class="num mono">'+p.potential+'</td>'+
+        '<td style="display:flex; gap:6px;"><button class="btn btn-sm btn-primary" data-action="intake-sign" data-id="'+p.id+'" type="button"'+(room<=0?' disabled':'')+'>Sumar</button><button class="btn btn-sm btn-ghost" data-action="intake-pass" data-id="'+p.id+'" type="button">Dejar ir</button></td></tr>';
+    }).join('');
+    intakeCard = '<div class="card card-feature"><p class="eyebrow">Camada '+it.season+' · llegaron '+it.players.length+' chicos a prueba</p>'+
+      '<p class="feature-line muted">Elegí a quiénes sumar a la cantera (lugar para '+Math.max(0,room)+' más, máximo '+YOUTH_CAP_MINE+'). Los que no sumes se van a otro club.</p>'+
+      '<div class="table-wrap"><table class="table"><thead><tr><th>Nombre</th><th>Pos</th><th>Edad</th><th>GEN</th><th>Potencial</th><th></th></tr></thead><tbody>'+iRows+'</tbody></table></div>'+
+      '<div class="card-actions"><button class="btn btn-primary" data-action="intake-best" type="button"'+(room<=0?' disabled':'')+'>Sumar a los de más potencial</button><button class="btn btn-ghost" data-action="intake-close" type="button">Cerrar la prueba</button></div></div>';
+  }
+  return '<div class="view-grid">'+intakeCard+
     '<div class="card"><p class="eyebrow">Director de juveniles</p><p class="feature-line">'+escapeHtml(youth.name)+' ('+youth.age+' años) · Nivel '+staffStars(youth.level)+'</p>'+
     '<p class="feature-line muted">Cuanto mejor tu director de juveniles, mejores prospectos aparecen en la cantera y más rápido progresan hacia su potencial. Podés cambiarlo desde Cuerpo técnico.</p></div>'+
     '<div class="card"><p class="eyebrow">Cantera</p><div class="table-wrap"><table class="table"><thead><tr><th>Nombre</th><th>Pos</th><th>Edad</th><th>GEN</th><th>Potencial</th><th>Estado</th><th></th></tr></thead><tbody>'+
@@ -8479,6 +8572,11 @@ function handleAction(action, id, el){
     case 'sell-player': { var res = sellPlayer(id); flashMessage = res.msg; saveGame(); render(); break; }
     case 'hire-staff-market': { var roleH = el?el.dataset.role:null; var resHire = hireStaffFromMarket(roleH, id); flashMessage = resHire.msg; saveGame(); render(); break; }
     case 'poach-staff': { var roleP = el?el.dataset.role:null; var clubP = el?el.dataset.club:null; var resPoach = poachStaff(roleP, clubP, id); flashMessage = resPoach.msg; saveGame(); render(); break; }
+    case 'intake-sign': { var resIs = intakeSign(id); toast(resIs.msg); saveGame(); render(); break; }
+    case 'intake-pass': intakePass(id); saveGame(); render(); break;
+    case 'intake-best': { var resIb = intakeSignBest(); toast(resIb.msg); saveGame(); render(); break; }
+    case 'intake-close': if(state.youthIntake) state.youthIntake.players = []; saveGame(); render(); break;
+    case 'release-youth': { var resRy = releaseYouth(id); toast(resRy.msg); saveGame(); render(); break; }
     case 'promote-youth': { var resProm = promoteYouthPlayer(id); flashMessage = resProm.msg; saveGame(); render(); break; }
     case 'promise-minutes': { var resPromise = promiseMinutes(id); flashMessage = resPromise.msg; saveGame(); render(); break; }
     case 'list-transfer': { var resList = listForTransfer(id); flashMessage = resList.msg; saveGame(); render(); break; }
