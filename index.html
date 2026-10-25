@@ -966,8 +966,49 @@ function applyFinances(){
       if(club.budget < -250000){
         state.manager.jobSecurity = clamp(state.manager.jobSecurity-2, 0, 100);
       }
+      checkRaiseRequests(club);
     }
   });
+}
+// el que juega bien y cobra poco pide aumento (uno por fecha como mucho); mientras no se lo des, la moral le baja de a poco
+function squadAvgOverall(club){
+  return club.players.length? club.players.reduce(function(s,p){ return s+overall(p); },0)/club.players.length : 60;
+}
+function raiseWanted(p){ return Math.round(playerWage(p)*1.05/10)*10; }
+function checkRaiseRequests(club){
+  var avg = squadAvgOverall(club), asked = false;
+  club.players.forEach(function(p){
+    var market = playerWage(p);
+    if(p.raiseAsk){
+      if((p.contractYears||0)<=1 || market < (p.wage||0)*1.12){ p.raiseAsk = null; return; }
+      var m = p.morale!==undefined? p.morale : 75;
+      if(m>45) p.morale = m-1;
+      return;
+    }
+    if(asked || (p.contractYears||0)<2 || p.age>32 || overall(p)<avg) return;
+    if(market < (p.wage||0)*1.3) return;
+    asked = true;
+    p.raiseAsk = {season:state.season, want:raiseWanted(p)};
+    pushNews({kind:'club', clubId:club.id, playerId:p.id,
+      headline: String(p.name).split(' ').pop().toUpperCase()+' PIDE UN AUMENTO',
+      body: p.name+' cobra '+fmtMoney(p.wage||0)+' por fecha y su representante dice que hoy vale '+fmtMoney(p.raiseAsk.want)+'. Mientras no le mejoren el contrato, va a andar con la cabeza en otro lado.',
+      tags:[club.name, p.name, 'Contratos']});
+  });
+}
+function grantRaise(playerId){
+  var club = getMyClub();
+  var p = club? club.players.find(function(x){ return x.id===playerId; }) : null;
+  if(!p) return {ok:false, msg:'No se encontró al jugador.'};
+  var want = p.raiseAsk? p.raiseAsk.want : raiseWanted(p);
+  p.wage = Math.max(p.wage||0, want);
+  p.raiseAsk = null;
+  p.morale = clamp((p.morale!==undefined? p.morale : 75)+8, 0, 100);
+  return {ok:true, msg:'Le diste el aumento a '+p.name+': ahora cobra '+fmtMoney(p.wage)+' por fecha.'};
+}
+// para avisar cuánto sale renovar (mismo cálculo que renewContract, con el bono a mitad de rango)
+function renewalEstimate(p, years){
+  var w = Math.round(playerWage(p)*(1+clamp((years-1)*0.06,0,0.3))/10)*10;
+  return {wage:w, bonus:Math.round(w*12/500)*500};
 }
 function newsRenewal(club, p, years){
   pushNews({kind:'club', clubId:club.id, playerId:p.id,
@@ -989,6 +1030,7 @@ function renewContract(playerId, years, withClause){
   p.wage = finalWage;
   p.contractYears = years;
   p.releaseClause = withClause? Math.round(marketValue(p)*1.4/500)*500 : null;
+  p.raiseAsk = null;
   newsRenewal(club, p, years);
   return {ok:true, msg:'Renovaste el contrato de '+p.name+' por '+years+' temporada'+(years===1?'':'s')+' (salario '+fmtMoney(finalWage)+'/fecha'+(withClause?', con cláusula de rescisión':'')+').'};
 }
@@ -3565,8 +3607,26 @@ function assistantRecs(club){
     if(want===cur || !tbl[want]) return;
     list.push({group:'plantel', text:f.label+': '+tbl[want].label+' le queda mejor a tu plantel que '+(tbl[cur]? tbl[cur].label : 'lo actual')+'.', action:f.action, id:want, label:tbl[want].label, order:2});
   });
+  list = list.concat(contractRecsFor(club));
   return {opp:opp, list:list};
 }
+function contractRecsFor(club){
+  var avg = squadAvgOverall(club), xi = club.lineup || [], out = [];
+  club.players.forEach(function(p){
+    var yrs = p.contractYears!==undefined? p.contractYears : 2, ov = overall(p);
+    var key = xi.indexOf(p.id)!==-1 || ov>=avg;
+    if(yrs<=1 && key && p.age<=31){
+      var est = renewalEstimate(p, 3);
+      out.push({group:'contratos', manual:true, text:p.name+' (GEN '+ov+', '+p.age+' años'+(xi.indexOf(p.id)!==-1? ', titular' : '')+') termina contrato esta temporada y se va libre si no renovás. Renovar 3 temporadas: bono de unos '+fmtMoney(est.bonus)+' y salario de '+fmtMoney(est.wage)+'/f.',
+        action:'renew-contract', id:p.id, label:'Renovar', order:3, sort:-ov});
+    } else if(p.raiseAsk){
+      out.push({group:'contratos', manual:true, text:p.name+' pide aumento: cobra '+fmtMoney(p.wage||0)+'/f y quiere '+fmtMoney(p.raiseAsk.want)+'/f. Mientras no se lo des, le baja la moral ('+Math.round(p.morale!==undefined? p.morale : 75)+').',
+        action:'grant-raise', id:p.id, label:'Darle el aumento', order:3, sort:-ov+100});
+    }
+  });
+  return out.sort(function(a,b){ return a.sort-b.sort; }).slice(0,5);
+}
+function autoAssistCount(recs){ return recs.list.filter(function(r){ return !r.manual; }).length; }
 function applyAssistRec(club, r){
   if(r.action==='quick-formation'){ if(FORMATIONS[r.id]){ club.formation = r.id; autoLineup(club); } return; }
   if(r.action==='assist-lineup'){ autoLineup(club); return; }
@@ -3588,11 +3648,13 @@ function assistantOverlayHTML(recs){
         '<button class="btn btn-ghost btn-sm" data-action="'+r.action+'" data-id="'+escapeHtml(r.id)+'" type="button">'+escapeHtml(r.label)+'</button></div>';
     }).join('');
   }
-  var rivalRows = rows('rival'), squadRows = rows('plantel');
+  var rivalRows = rows('rival'), squadRows = rows('plantel'), contractRows = rows('contratos');
+  var nAuto = autoAssistCount(recs);
   var body = recs.list.length
-    ? '<div class="card-actions" style="margin-top:8px;"><button class="btn btn-primary" data-action="assist-apply-all" type="button">Aplicar todo ('+recs.list.length+')</button></div>'+
+    ? (nAuto? '<div class="card-actions" style="margin-top:8px;"><button class="btn btn-primary" data-action="assist-apply-all" type="button">Aplicar todo ('+nAuto+')</button></div>' : '')+
       (rivalRows? '<p class="assist-group">Para el partido contra '+escapeHtml(recs.opp.name)+'</p>'+rivalRows : '')+
-      (squadRows? '<p class="assist-group">Según tu plantel</p>'+squadRows : '')
+      (squadRows? '<p class="assist-group">Según tu plantel</p>'+squadRows : '')+
+      (contractRows? '<p class="assist-group">Contratos (cuestan plata: decidís vos uno por uno)</p>'+contractRows : '')
     : '<p class="feature-line" style="margin-top:10px;">Está todo como lo armaría tu asistente. Podés jugar tranquilo.</p>';
   return '<div class="overlay-backdrop" data-action="close-assistant">'+
     '<div class="overlay-panel" data-action="noop">'+
@@ -5026,7 +5088,7 @@ function renderInicio(){
   return '<div class="view-grid">'+mainCard+pinnedShortcutsCardHTML()+newsFeedCardHTML()+historyHTML+'</div>';
 }
 function assistQuickBtnHTML(club){
-  var n = assistantVisible()? assistantRecs(club).list.length : 0;
+  var n = assistantVisible()? autoAssistCount(assistantRecs(club)) : 0;
   return n? '<button class="btn btn-ghost" data-action="assist-apply-all" type="button">Aplicar lo que sugiere el asistente ('+n+')</button>' : '';
 }
 function pinnedShortcutsCardHTML(){
@@ -8135,7 +8197,7 @@ function handleAction(action, id, el){
       if(mcAll && assistantVisible()){
         // cambiar el once puede cambiar lo que conviene contra el rival: se repasa hasta que no quede nada (como mucho tres vueltas)
         for(var pass=0; pass<3; pass++){
-          var recsAll = assistantRecs(mcAll).list.slice().sort(function(a,b){ return a.order-b.order; });
+          var recsAll = assistantRecs(mcAll).list.filter(function(r){ return !r.manual; }).sort(function(a,b){ return a.order-b.order; });
           if(!recsAll.length) break;
           recsAll.forEach(function(r){ applyAssistRec(mcAll, r); });
         }
@@ -8341,8 +8403,9 @@ function handleAction(action, id, el){
     case 'promote-youth': { var resProm = promoteYouthPlayer(id); flashMessage = resProm.msg; saveGame(); render(); break; }
     case 'promise-minutes': { var resPromise = promiseMinutes(id); flashMessage = resPromise.msg; saveGame(); render(); break; }
     case 'list-transfer': { var resList = listForTransfer(id); flashMessage = resList.msg; saveGame(); render(); break; }
-    case 'renew-contract': { var resRenew = renewContract(id, 3, false); flashMessage = resRenew.msg; saveGame(); render(); break; }
-    case 'renew-contract-clause': { var resRenewC = renewContract(id, 3, true); flashMessage = resRenewC.msg; saveGame(); render(); break; }
+    case 'renew-contract': { var resRenew = renewContract(id, 3, false); flashMessage = resRenew.msg; saveGame(); render(); toast(resRenew.msg); break; }
+    case 'grant-raise': { var resRaise = grantRaise(id); flashMessage = resRaise.msg; saveGame(); render(); toast(resRaise.msg); break; }
+    case 'renew-contract-clause': { var resRenewC = renewContract(id, 3, true); flashMessage = resRenewC.msg; saveGame(); render(); toast(resRenewC.msg); break; }
     case 'buy-clause': { var clubBC = el?el.dataset.club:null; var resClause = buyViaReleaseClause(id, clubBC); flashMessage = resClause.msg; saveGame(); render(); break; }
     case 'scout-player': scoutPlayer(id, el?el.dataset.club:null); saveGame(); render(); break;
     case 'offer-market': if(state.negotiation) sendOffer(state.negotiation.playerValue); saveGame(); render(); break;
