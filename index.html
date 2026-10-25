@@ -2136,11 +2136,19 @@ function anPlayer(id){
 }
 // el final de cada tiempo, ya con el descuento incluido
 function halfEnd(lm){ return 45 + (lm.addedFirst||0); }
-function matchEnd(lm){ return 90 + (lm.addedFirst||0) + (lm.addedSecond||0); }
+function matchEnd(lm){ return 90 + (lm.addedFirst||0) + (lm.addedSecond||0) + (lm.extraTime? 30+(lm.addedET||0) : 0); }
+function isExtraBreak(lm){ return !!(lm.extraTime && lm.clock===lm.etStart); }
+// terminaron los 90 iguales en una llave: alargue de 30 minutos, con pausa para hacer cambios
+function startExtraTime(lm, homeClub, awayClub){
+  lm.extraTime = true; lm.etStart = lm.clock; lm.addedET = rnd(0,2);
+  lm.events.push({minute:lm.clock, type:'flavor', text:'Terminan los 90 iguales: se juega un alargue de 30 minutos.'});
+  aiFatigueSubs(lm, homeClub, awayClub, 80, 6);
+  if(anim){ animReconcile(lm, homeClub, awayClub); animKickoff('home'); }
+}
 function canMakeSub(lm){
   if(!lm) return false;
-  if(lm.mySubsUsed>=5) return false;
-  if(lm.clock===halfEnd(lm)) return true;
+  if(lm.mySubsUsed>=(lm.extraTime? 6 : 5)) return false;
+  if(lm.clock===halfEnd(lm) || isExtraBreak(lm)) return true;
   if(lm.usedWindowThisPause) return true;
   return lm.subWindowsUsed<3;
 }
@@ -2452,8 +2460,8 @@ function liveWear(lm, club, onPitchKey, side){
 // la IA hace cambios en el segundo tiempo (60', 70' y 80'): saca a los más cansados si tiene en el banco
 // a alguien que hoy rinda parecido, hasta dos por ventana y cinco en total (los de lesión cuentan)
 var AI_SUB_WINDOWS = {60:72, 70:78, 80:81};
-function aiFatigueSubs(lm, homeClub, awayClub){
-  var limit = AI_SUB_WINDOWS[lm.clock];
+function aiFatigueSubs(lm, homeClub, awayClub, limitOverride, maxSubs){
+  var limit = limitOverride || AI_SUB_WINDOWS[lm.clock];
   if(!limit) return;
   var aiSides = lm.mySide? [lm.mySide==='home'? 'away' : 'home'] : ['home','away'];
   aiSides.forEach(function(side){
@@ -2466,7 +2474,7 @@ function aiFatigueSubs(lm, homeClub, awayClub){
       .sort(function(a,b){ return playerFitness(a)-playerFitness(b); });
     var made = 0;
     tired.forEach(function(p){
-      if(made>=2 || used>=5) return;
+      if(made>=2 || used>=(maxSubs||5)) return;
       var slotPos = (lm.posOverride && lm.posOverride[p.id]) || p.pos;
       var bench = club.players.filter(function(b){
         return b.pos===slotPos && lm[key].indexOf(b.id)===-1 && !isUnavailable(b) && gone.indexOf(b.id)===-1;
@@ -2534,6 +2542,13 @@ function liveMinuteTick(){
     lm.tip = ins.length? {text: ins[0].text, minute: lm.clock} : lm.tip;
   }
   if(lm.clock>=matchEnd(lm)){
+    if(lm.ko && !lm.extraTime && lm.homeGoals===lm.awayGoals){
+      startExtraTime(lm, homeClub, awayClub);
+      if(ENGINE_HEADLESS) return;
+      lm.status = 'paused';
+      saveGame();
+      return;
+    }
     if(ENGINE_HEADLESS){ lm.finished = true; return; }
     finalizeLiveMatch();
     saveGame();
@@ -3317,9 +3332,10 @@ function maybeAdjustCareerAfterMatchday(){
    Se juegan sin pantalla y en segundo plano (en las pausas, el entretiempo o cuando estás en
    otra sección), así no se traba nada. Antes de que pase la semana se terminan todos.        */
 var simPumpHandle = null;
-function engineSimMatch(home, away, leagueId, round){
+function engineSimMatch(home, away, leagueId, round, ko){
   var savedLm = state.liveMatch, savedAnim = anim, savedStep = ENGINE_STEP;
   var lm = beginLiveMatch(home, away, null, round, leagueId);
+  lm.ko = !!ko;
   lm.speed = 'headless';
   state.liveMatch = lm;
   ENGINE_HEADLESS = true;
@@ -3384,12 +3400,35 @@ function aiPlanFor(club, opp){
     }
   };
 }
-function aiPrepareMatch(club, opp){
+// en copa la IA guarda titulares cuando el rival es más flojo (cuanto más flojo, más cambia);
+// primero descansan los más cargados. En semis y finales juega con todo.
+function aiCupRotate(club, opp, stage){
+  if(!stage || stage==='sf' || stage==='final') return 0;
+  var gap = clubStrength(club) - clubStrength(opp);
+  var n = gap>=6? 4 : gap>=3? 3 : gap>=0? 1 : 0;
+  if(n && stage==='r1') n++;
+  if(!n) return 0;
+  var byId = function(id){ return club.players.find(function(p){ return p.id===id; }); };
+  var starters = club.lineup.map(byId).filter(function(p){ return p && (p.pos!=='POR' || gap>=6); })
+    .sort(function(a,b){ return (playerLoad(b)-playerLoad(a)) || (overall(b)-overall(a)); });
+  var rested = 0;
+  starters.forEach(function(p){
+    if(rested>=n) return;
+    var sub = club.players.filter(function(b){ return b.pos===p.pos && club.lineup.indexOf(b.id)===-1 && !isUnavailable(b); })
+      .sort(function(a,b){ return selectionValue(b)-selectionValue(a); })[0];
+    if(!sub || selectionValue(sub) < selectionValue(p)*0.8) return;
+    club.lineup = club.lineup.map(function(id){ return id===p.id? sub.id : id; });
+    rested++;
+  });
+  return rested;
+}
+function aiPrepareMatch(club, opp, cupStage){
   var myClub = getMyClub();
   if(myClub && club.id===myClub.id) return null;
   var plan = aiPlanFor(club, opp);
   club.formation = plan.formation;
   autoLineup(club);
+  plan.rested = aiCupRotate(club, opp, cupStage);
   club.mentality = plan.mentality;
   club.tactics = plan.tactics;
   return plan;
@@ -4201,11 +4240,12 @@ function cupShootout(home, away){
   return {h:h, a:a};
 }
 // anota el resultado de un partido de copa y reparte premios; devuelve la línea para la cinta
-function cupRecordResult(compId, key, hg, ag){
+function cupRecordResult(compId, key, hg, ag, et){
   var comp = state.cups.comps[compId];
   var m = comp? cupFindMatch(comp, key) : null;
   if(!m || m.played) return '';
   m.hg = hg; m.ag = ag; m.played = true;
+  if(et) m.et = true;
   var home = cupTeam(m.home), away = cupTeam(m.away);
   if(home) home.budget += matchdayIncome(home);
   var stage = String(key).split(':')[0];
@@ -4217,8 +4257,8 @@ function cupRecordResult(compId, key, hg, ag){
   } else {
     if(hg===ag){
       m.pens = cupShootout(home, away);
-      pensTxt = ' ('+m.pens.h+'-'+m.pens.a+' por penales)';
-    }
+      pensTxt = ' ('+(et? 'alargue y ' : '')+m.pens.h+'-'+m.pens.a+' por penales)';
+    } else if(et) pensTxt = ' (en el alargue)';
     m.winner = (hg>ag || (hg===ag && m.pens.h>m.pens.a))? m.home : m.away;
     if(stage==='final'){
       comp.championId = m.winner;
@@ -4236,10 +4276,12 @@ function cupRecordResult(compId, key, hg, ag){
 function playCupSim(item){
   var home = cupTeam(item.home), away = cupTeam(item.away);
   if(!home || !away) return '';
-  aiPrepareMatch(home, away);
-  aiPrepareMatch(away, home);
-  var m = engineSimMatch(home, away, item.compId, 100+item.dateIdx);
-  return cupRecordResult(item.compId, item.key, m.homeGoals, m.awayGoals);
+  var stage = String(item.key).split(':')[0];
+  aiPrepareMatch(home, away, stage);
+  aiPrepareMatch(away, home, stage);
+  var ko = stage.charAt(0)!=='g';
+  var m = engineSimMatch(home, away, item.compId, 100+item.dateIdx, ko);
+  return cupRecordResult(item.compId, item.key, m.homeGoals, m.awayGoals, m.extraTime);
 }
 function beginCupDate(di){
   flushSims();
@@ -4261,9 +4303,10 @@ function beginCupDate(di){
       var isMine = myClub && (home.id===myClub.id || away.id===myClub.id);
       if(isMine){
         var mySide = home.id===myClub.id? 'home' : 'away';
-        if(mySide==='home') aiPrepareMatch(away, home); else aiPrepareMatch(home, away);
+        if(mySide==='home') aiPrepareMatch(away, home, d.stage); else aiPrepareMatch(home, away, d.stage);
         state.liveMatch = beginLiveMatch(home, away, mySide, 100+di, comp.id);
         state.liveMatch.cup = {compId:comp.id, key:x.key, stage:d.stage, dateIdx:di};
+        state.liveMatch.ko = d.stage.charAt(0)!=='g';
         liveStarted = true;
       } else {
         state.pendingSims.push({cup:true, compId:comp.id, key:x.key, dateIdx:di, home:home.id, away:away.id, ticker:!!mineHere});
@@ -4332,7 +4375,7 @@ function cupCrownChampion(comp, myClub){
 function finalizeCupLiveMatch(lm){
   var homeClub = cupTeam(lm.homeId), awayClub = cupTeam(lm.awayId);
   var cup = lm.cup, comp = state.cups.comps[cup.compId];
-  var line = cupRecordResult(cup.compId, cup.key, lm.homeGoals, lm.awayGoals);
+  var line = cupRecordResult(cup.compId, cup.key, lm.homeGoals, lm.awayGoals, lm.extraTime);
   var m = comp? cupFindMatch(comp, cup.key) : null;
   if(m && m.pens){
     lm.events.push({minute:matchEnd(lm), type:'flavor', text:'Definición por penales: '+homeClub.name+' '+m.pens.h+' - '+m.pens.a+' '+awayClub.name+'. Pasa '+(m.winner===homeClub.id? homeClub.name : awayClub.name)+'.'});
@@ -4363,7 +4406,7 @@ function finalizeCupLiveMatch(lm){
       : myGoals===hisGoals? 'EMPATE DEL '+mine.name.toUpperCase()+' EN LA '+comp.name.toUpperCase()
       : 'DERROTA DEL '+mine.name.toUpperCase()+' EN LA '+comp.name.toUpperCase();
   }
-  body = label+'. Terminó '+homeClub.name+' '+lm.homeGoals+' - '+lm.awayGoals+' '+awayClub.name+(m && m.pens? ' y se definió por penales ('+m.pens.h+'-'+m.pens.a+')' : '')+'.'+
+  body = label+'. Terminó '+homeClub.name+' '+lm.homeGoals+' - '+lm.awayGoals+' '+awayClub.name+(lm.extraTime? ' después del alargue' : '')+(m && m.pens? ' y se definió por penales ('+m.pens.h+'-'+m.pens.a+')' : '')+'.'+
     (motm? ' La figura de la cancha fue '+motm.p.name+', con '+motm.rating.toFixed(1)+'.' : '');
   pushNews({kind:'match', clubId:mine.id, playerId: motm? motm.p.id : null, headline:head, body:body, tags:[mine.name, rival.name, comp.name]});
   flushSims();
@@ -4407,7 +4450,7 @@ function cupMatchRowHTML(m, myClub){
   return '<li class="'+(mine? 'cup-mine' : '')+'"><span class="team-chip'+(hw? ' cup-win' : '')+'">'+crestSVG(home,16)+escapeHtml(home.name)+'</span>'+
     '<span class="mono score">'+score+'</span>'+
     '<span class="team-chip'+(aw? ' cup-win' : '')+'">'+crestSVG(away,16)+escapeHtml(away.name)+'</span>'+
-    (m.pens? '<span class="muted cup-pens">penales '+m.pens.h+'-'+m.pens.a+'</span>' : '')+'</li>';
+    (m.pens? '<span class="muted cup-pens">'+(m.et? 'alargue, ' : '')+'penales '+m.pens.h+'-'+m.pens.a+'</span>' : m.et? '<span class="muted cup-pens">en el alargue</span>' : '')+'</li>';
 }
 function renderCopas(){
   var myClub = getMyClub();
@@ -4482,7 +4525,7 @@ function myCupFixturesHTML(myClub){
         if(m.home!==myClub.id && m.away!==myClub.id) return;
         var isHome = m.home===myClub.id;
         var opp = cupTeam(isHome? m.away : m.home);
-        var score = m.played? (m.hg+' - '+m.ag+(m.pens? ' ('+m.pens.h+'-'+m.pens.a+' pen.)' : '')) : '—';
+        var score = m.played? (m.hg+' - '+m.ag+(m.pens? ' ('+m.pens.h+'-'+m.pens.a+' pen.)' : m.et? ' (alargue)' : '')) : '—';
         var isNext = nextCupDate()===di;
         rows.push('<tr class="'+(isNext? 'is-next' : '')+'"><td><div class="team-cell">'+(isHome?'vs ':'@ ')+crestSVG(opp,18)+escapeHtml(opp.name)+'</div>'+
           '<div class="muted" style="font-size:11px; margin-top:2px;">'+escapeHtml(comp.name)+' · '+(CUP_STAGE_LABEL[d.stage]||'')+' · '+(d.after? 'tras la fecha '+d.after : 'antes de la fecha 1')+'</div></td><td class="num mono">'+score+'</td></tr>');
@@ -8288,6 +8331,7 @@ function motmFromRatings(ratings, homeClub, awayClub){
 // el "+3" que aparece al lado del reloj cuando se juega el descuento
 function addedTimeBadge(lm){
   var extra = 0;
+  if(lm.extraTime && lm.clock >= lm.etStart) return '<span class="added-time">Alargue</span>';
   if(lm.clock >= 45 && lm.clock <= halfEnd(lm)) extra = lm.addedFirst||0;
   else if(lm.clock >= 90) extra = lm.addedSecond||0;
   return extra? '<span class="added-time">+'+extra+'</span>' : '';
@@ -8301,7 +8345,7 @@ function renderLiveMatch(){
   if(isHalftime && anim && anim.key===animMatchKey(lm)) anim.panelUntil = anim.clock + 0.1;
 
   var statusBadge = isPaused
-    ? '<span class="live-badge is-paused">'+(isHalftime?'Entretiempo':'En pausa')+'</span>'
+    ? '<span class="live-badge is-paused">'+(isHalftime?'Entretiempo':isExtraBreak(lm)?'Antes del alargue':'En pausa')+'</span>'
     : '<span class="live-badge is-live"><span class="live-dot"></span>En vivo</span>';
   var shownFlash = liveShownFlash(lm);
   var flashHTML = shownFlash ? '<div class="goal-flash">¡GOL'+(shownFlash===lm.mySide?' TUYO':'')+'! '+(shownFlash==='home'?escapeHtml(homeClub.name):escapeHtml(awayClub.name))+'</div>' : '';
