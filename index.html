@@ -966,8 +966,50 @@ function applyFinances(){
       if(club.budget < -250000){
         state.manager.jobSecurity = clamp(state.manager.jobSecurity-2, 0, 100);
       }
+      checkRaiseRequests(club);
+      maybeIncomingBids(club);
     }
   });
+}
+// el que juega bien y cobra poco pide aumento (uno por fecha como mucho); mientras no se lo des, la moral le baja de a poco
+function squadAvgOverall(club){
+  return club.players.length? club.players.reduce(function(s,p){ return s+overall(p); },0)/club.players.length : 60;
+}
+function raiseWanted(p){ return Math.round(playerWage(p)*1.05/10)*10; }
+function checkRaiseRequests(club){
+  var avg = squadAvgOverall(club), asked = false;
+  club.players.forEach(function(p){
+    var market = playerWage(p);
+    if(p.raiseAsk){
+      if((p.contractYears||0)<=1 || market < (p.wage||0)*1.08){ p.raiseAsk = null; return; }
+      var m = p.morale!==undefined? p.morale : 75;
+      if(m>45) p.morale = m-1;
+      return;
+    }
+    if(asked || p.loanFrom || (p.contractYears||0)<2 || p.age>32 || overall(p)<avg) return;
+    if(market < (p.wage||0)*1.2) return;
+    asked = true;
+    p.raiseAsk = {season:state.season, want:raiseWanted(p)};
+    pushNews({kind:'club', clubId:club.id, playerId:p.id,
+      headline: String(p.name).split(' ').pop().toUpperCase()+' PIDE UN AUMENTO',
+      body: p.name+' cobra '+fmtMoney(p.wage||0)+' por fecha y su representante dice que hoy vale '+fmtMoney(p.raiseAsk.want)+'. Mientras no le mejoren el contrato, va a andar con la cabeza en otro lado.',
+      tags:[club.name, p.name, 'Contratos']});
+  });
+}
+function grantRaise(playerId){
+  var club = getMyClub();
+  var p = club? club.players.find(function(x){ return x.id===playerId; }) : null;
+  if(!p) return {ok:false, msg:'No se encontró al jugador.'};
+  var want = p.raiseAsk? p.raiseAsk.want : raiseWanted(p);
+  p.wage = Math.max(p.wage||0, want);
+  p.raiseAsk = null;
+  p.morale = clamp((p.morale!==undefined? p.morale : 75)+8, 0, 100);
+  return {ok:true, msg:'Le diste el aumento a '+p.name+': ahora cobra '+fmtMoney(p.wage)+' por fecha.'};
+}
+// para avisar cuánto sale renovar (mismo cálculo que renewContract, con el bono a mitad de rango)
+function renewalEstimate(p, years){
+  var w = Math.round(playerWage(p)*(1+clamp((years-1)*0.06,0,0.3))/10)*10;
+  return {wage:w, bonus:Math.round(w*12/500)*500};
 }
 function newsRenewal(club, p, years){
   pushNews({kind:'club', clubId:club.id, playerId:p.id,
@@ -980,6 +1022,7 @@ function renewContract(playerId, years, withClause){
   if(!club) return {ok:false, msg:'No dirigís ningún club.'};
   var p = club.players.find(function(x){return x.id===playerId;});
   if(!p) return {ok:false, msg:'No se encontró al jugador.'};
+  if(p.loanFrom) return {ok:false, msg:p.name+' está a préstamo: el contrato es con su club.'};
   var newWage = playerWage(p);
   var raiseFactor = 1 + clamp((years-1)*0.06, 0, 0.3) + (withClause? 0.08 : 0);
   var finalWage = Math.round(newWage*raiseFactor/10)*10;
@@ -989,6 +1032,7 @@ function renewContract(playerId, years, withClause){
   p.wage = finalWage;
   p.contractYears = years;
   p.releaseClause = withClause? Math.round(marketValue(p)*1.4/500)*500 : null;
+  p.raiseAsk = null;
   newsRenewal(club, p, years);
   return {ok:true, msg:'Renovaste el contrato de '+p.name+' por '+years+' temporada'+(years===1?'':'s')+' (salario '+fmtMoney(finalWage)+'/fecha'+(withClause?', con cláusula de rescisión':'')+').'};
 }
@@ -1001,6 +1045,7 @@ function buyViaReleaseClause(playerId, ownerClubId){
   var idx = ownerClub.players.findIndex(function(p){return p.id===playerId;});
   if(idx===-1) return {ok:false, msg:'El jugador ya no está disponible.'};
   var player = ownerClub.players[idx];
+  if(player.loanFrom) return {ok:false, msg:player.name+' está a préstamo en el '+ownerClub.name+': no se puede pagar la cláusula.'};
   if(!player.releaseClause) return {ok:false, msg:'Ese jugador no tiene cláusula de rescisión.'};
   if(myClub.players.length>=23) return {ok:false, msg:'Tu plantel ya tiene el máximo de 23 jugadores.'};
   var amount = player.releaseClause;
@@ -1345,6 +1390,72 @@ function genYouthPlayer(club, league){
   player.potential = clamp(ov + rnd(5, potRange), ov, 99);
   player.value = marketValue(player);
   return player;
+}
+/* camada: cada pretemporada llegan 4 a 6 chicos a las inferiores de tu club; elegís a quiénes sumar.
+   A veces viene una joya (más seguido con un buen director de juveniles). Los que no sumás se van. */
+var YOUTH_CAP_MINE = 8;
+function makeYouthIntake(club, league){
+  var lvl = staffLevel(club,'youth');
+  var n = 4 + (lvl>=4? 1 : 0) + rnd(0,1), list = [];
+  for(var i=0; i<n; i++){
+    var yp = genYouthPlayer({tier:club.tier, players:club.players, youthPlayers:(club.youthPlayers||[]).concat(list), staff:club.staff}, league);
+    list.push(yp);
+  }
+  if(Math.random() < 0.15+lvl*0.05){
+    var gem = list[rnd(0,list.length-1)];
+    gem.potential = clamp(gem.potential+rnd(6,12), overall(gem), 99);
+    gem.gem = true;
+    gem.value = marketValue(gem);
+  }
+  return {season:state.season+1, players:list};
+}
+function youthIntakePending(){
+  return !!(state && state.youthIntake && state.youthIntake.players && state.youthIntake.players.length && getMyClub());
+}
+function newsYouthIntake(club){
+  var it = state.youthIntake;
+  if(!it || !it.players.length) return;
+  var best = it.players.slice().sort(function(a,b){ return b.potential-a.potential; })[0];
+  var gem = it.players.find(function(p){ return p.gem; });
+  pushNews({kind:'club', clubId:club.id, playerId:best.id,
+    headline: 'LLEGÓ LA CAMADA '+it.season+' A LAS INFERIORES DEL '+club.name.toUpperCase(),
+    body: it.players.length+' chicos se suman a la prueba. '+(gem? 'En el club hablan maravillas de '+gem.name+' ('+gem.pos+', '+gem.age+' años): dicen que es una joya. ' : 'El de más proyección es '+best.name+' ('+best.pos+', potencial '+best.potential+'). ')+'Tenés que decidir a quiénes sumar a la cantera.',
+    tags:[club.name, 'Juveniles']});
+}
+function intakeSign(playerId){
+  var club = getMyClub(), it = state.youthIntake;
+  if(!club || !it) return {ok:false, msg:'No hay camada pendiente.'};
+  var idx = it.players.findIndex(function(p){ return p.id===playerId; });
+  if(idx===-1) return {ok:false, msg:'Ese chico ya no está en la prueba.'};
+  if((club.youthPlayers||[]).length>=YOUTH_CAP_MINE) return {ok:false, msg:'La cantera está llena ('+YOUTH_CAP_MINE+'). Promové o dejá libre a alguno primero.'};
+  var p = it.players.splice(idx,1)[0];
+  club.youthPlayers.push(p);
+  return {ok:true, msg:p.name+' se suma a la cantera.'};
+}
+function intakePass(playerId){
+  var it = state.youthIntake;
+  if(!it) return;
+  it.players = it.players.filter(function(p){ return p.id!==playerId; });
+}
+function intakeSignBest(){
+  var club = getMyClub(), it = state.youthIntake;
+  if(!club || !it) return {ok:false, msg:'No hay camada pendiente.'};
+  var room = YOUTH_CAP_MINE - (club.youthPlayers||[]).length, signed = [];
+  it.players.slice().sort(function(a,b){ return b.potential-a.potential; }).forEach(function(p){
+    if(room<=0) return;
+    room--; signed.push(p.name);
+    club.youthPlayers.push(p);
+  });
+  it.players = [];
+  return {ok:true, msg: signed.length? 'Sumaste a la cantera a '+signed.join(', ')+'.' : 'La cantera está llena: no entró nadie.'};
+}
+function releaseYouth(playerId){
+  var club = getMyClub();
+  if(!club) return {ok:false, msg:'No dirigís ningún club.'};
+  var idx = (club.youthPlayers||[]).findIndex(function(p){ return p.id===playerId; });
+  if(idx===-1) return {ok:false, msg:'No se encontró a ese juvenil.'};
+  var p = club.youthPlayers.splice(idx,1)[0];
+  return {ok:true, msg:p.name+' deja las inferiores del club.'};
 }
 function newsYouth(club, p){
   pushNews({kind:'club', clubId:club.id, playerId:p.id,
@@ -2502,6 +2613,7 @@ function finalizeLiveMatch(){
   var oppClub = lm.mySide==='home'? awayClub: homeClub;
   var result = myGoals>oppGoals?'win': myGoals===oppGoals?'draw':'loss';
   adjustJobSecurity(myClub, result, oppClub.tier);
+  boardReview(myClub);
   state.manager.tenureMatchdays++;
   checkFired();
   if(state.manager.clubId) maybeUnsolicitedOffer();
@@ -2611,11 +2723,181 @@ function promiseMinutes(playerId){
   state.manager.promisesUsed = (state.manager.promisesUsed||0)+1;
   return {ok:true, msg:'Le prometiste más minutos a '+p.name+'. Su ánimo mejoró, pero vas a tener que cumplir.'};
 }
+/* ---------- mercado vivo: otros clubes ofertan por tus jugadores, y hay préstamos ----------
+   Las ofertas llegan entre fechas (más seguido si tenés jugadores en la lista de transferibles)
+   y vencen a las tres fechas. Los préstamos duran hasta fin de temporada: en la pretemporada
+   cada uno vuelve a su club. El sueldo lo paga el club donde está jugando. */
+function bidsList(){ if(!Array.isArray(state.incomingBids)) state.incomingBids = []; return state.incomingBids; }
+function detachPlayer(club, playerId){
+  var idx = club.players.findIndex(function(p){ return p.id===playerId; });
+  if(idx===-1) return null;
+  var p = club.players.splice(idx,1)[0];
+  club.lineup = club.lineup.filter(function(id){ return id!==playerId; });
+  if(club.tactics.penaltyTaker===playerId) club.tactics.penaltyTaker = null;
+  if(club.tactics.freeKickTaker===playerId) club.tactics.freeKickTaker = null;
+  var need = FORMATIONS[club.formation];
+  var inPos = club.lineup.filter(function(id){ var pl = club.players.find(function(x){ return x.id===id; }); return pl && pl.pos===p.pos; }).length;
+  if(inPos<need[p.pos]){
+    var bench = club.players.filter(function(pl){ return pl.pos===p.pos && club.lineup.indexOf(pl.id)===-1 && !isUnavailable(pl); }).sort(function(a,b){ return overall(b)-overall(a); });
+    if(bench.length) club.lineup.push(bench[0].id); else autoLineup(club);
+  }
+  return p;
+}
+function loanFee(p){ return Math.max(500, Math.round(p.value*0.08/500)*500); }
+function maybeIncomingBids(myClub){
+  var bids = bidsList();
+  state.incomingBids = bids.filter(function(b){ return b.expires>state.matchdayIdx && myClub.players.some(function(p){ return p.id===b.playerId; }); });
+  if(state.incomingBids.length>=3) return;
+  var listed = myClub.players.some(function(p){ return p.transferListed && !p.loanFrom; });
+  if(Math.random() > 0.10+(listed? 0.25 : 0)) return;
+  var pool = myClub.players.filter(function(p){ return !p.loanFrom && !state.incomingBids.some(function(b){ return b.playerId===p.id; }); });
+  if(!pool.length) return;
+  var weights = pool.map(function(p){ return (p.transferListed? 4 : 1)*Math.pow(overall(p)/60, 3)*(p.age<=24? 1.4 : 1); });
+  var tot = weights.reduce(function(a,b){ return a+b; },0), r = Math.random()*tot, p = pool[0];
+  for(var i=0; i<pool.length; i++){ r -= weights[i]; if(r<=0){ p = pool[i]; break; } }
+  var isLoan = p.age<=21 && myClub.lineup.indexOf(p.id)===-1 && Math.random()<0.6;
+  var amount = isLoan? loanFee(p) : Math.round(p.value*(p.transferListed? rnd(70,100) : rnd(90,135))/100/500)*500;
+  var bidders = state.teams.filter(function(t){
+    if(t.id===myClub.id || t.players.length>=25 || t.budget<amount) return false;
+    return isLoan? t.tier<=myClub.tier : t.tier>=myClub.tier-1;
+  });
+  if(!bidders.length) return;
+  var bidder = bidders[rnd(0,bidders.length-1)];
+  var bid = {id:uid(), playerId:p.id, clubId:bidder.id, amount:amount, kind:isLoan? 'loan' : 'transfer', expires:state.matchdayIdx+3, countered:false};
+  state.incomingBids.push(bid);
+  pushNews({kind:'transfer', clubId:myClub.id, playerId:p.id,
+    headline: isLoan? 'EL '+bidder.name.toUpperCase()+' PIDE A '+String(p.name).split(' ').pop().toUpperCase()+' A PRÉSTAMO' : 'EL '+bidder.name.toUpperCase()+' OFERTA '+fmtMoney(amount)+' POR '+String(p.name).split(' ').pop().toUpperCase(),
+    body: isLoan? bidder.name+' quiere a '+p.name+' hasta fin de temporada para darle minutos. Pagaría '+fmtMoney(amount)+' y se haría cargo del sueldo. La oferta vence en tres fechas (Mercado).'
+      : bidder.name+' ofreció '+fmtMoney(amount)+' por '+p.name+' (valor de mercado '+fmtMoney(p.value)+'). Tenés tres fechas para contestar desde Mercado.',
+    tags:[myClub.name, bidder.name, 'Mercado']});
+}
+function resolveBid(bidId){
+  var b = bidsList().find(function(x){ return x.id===bidId; });
+  var club = getMyClub();
+  if(!b || !club) return null;
+  var bidder = state.teams.find(function(t){ return t.id===b.clubId; });
+  var p = club.players.find(function(x){ return x.id===b.playerId; });
+  if(!bidder || !p){ state.incomingBids = bidsList().filter(function(x){ return x.id!==bidId; }); return null; }
+  return {b:b, club:club, bidder:bidder, p:p};
+}
+function acceptBid(bidId){
+  var r = resolveBid(bidId);
+  if(!r) return {ok:false, msg:'Esa oferta ya no está.'};
+  if(r.club.players.length<=14) return {ok:false, msg:'No podés: te quedarías con menos de 14 jugadores.'};
+  if(r.bidder.budget<r.b.amount) return {ok:false, msg:r.bidder.name+' ya no tiene la plata para cerrar.'};
+  var p = detachPlayer(r.club, r.p.id);
+  r.club.budget += r.b.amount; r.bidder.budget -= r.b.amount;
+  p.transferListed = false;
+  if(r.b.kind==='loan'){ p.loanFrom = r.club.id; p.loanSeason = state.season; }
+  else { p.wage = playerWage(p); p.contractYears = rnd(2,4); p.releaseClause = null; p.raiseAsk = null; }
+  r.bidder.players.push(p);
+  state.incomingBids = bidsList().filter(function(x){ return x.playerId!==p.id; });
+  pushNews({kind:'transfer', clubId:r.club.id, playerId:p.id,
+    headline: r.b.kind==='loan'? String(p.name).split(' ').pop().toUpperCase()+' SE VA A PRÉSTAMO AL '+r.bidder.name.toUpperCase() : String(p.name).split(' ').pop().toUpperCase()+' ES NUEVO JUGADOR DEL '+r.bidder.name.toUpperCase(),
+    body: r.b.kind==='loan'? p.name+' juega en el '+r.bidder.name+' hasta fin de temporada y vuelve en la pretemporada. El club cobra '+fmtMoney(r.b.amount)+'.' : r.club.name+' aceptó '+fmtMoney(r.b.amount)+' y '+p.name+' se muda al '+r.bidder.name+'.',
+    tags:[r.club.name, r.bidder.name, 'Mercado']});
+  return {ok:true, msg: r.b.kind==='loan'? p.name+' se va a préstamo al '+r.bidder.name+' (cobrás '+fmtMoney(r.b.amount)+').' : 'Vendiste a '+p.name+' al '+r.bidder.name+' por '+fmtMoney(r.b.amount)+'.'};
+}
+function rejectBid(bidId){
+  var r = resolveBid(bidId);
+  if(!r) return {ok:false, msg:'Esa oferta ya no está.'};
+  state.incomingBids = bidsList().filter(function(x){ return x.id!==bidId; });
+  // si lo quería un club más grande y no estaba en venta, al jugador no le cae bien
+  var upset = r.b.kind==='transfer' && r.bidder.tier>r.club.tier && !r.p.transferListed;
+  if(upset) r.p.morale = clamp((r.p.morale!==undefined? r.p.morale : 75)-6, 0, 100);
+  return {ok:true, msg:'Rechazaste la oferta del '+r.bidder.name+' por '+r.p.name+'.'+(upset? ' A él le hubiera gustado ir: anda un poco bajoneado.' : '')};
+}
+function counterBid(bidId){
+  var r = resolveBid(bidId);
+  if(!r) return {ok:false, msg:'Esa oferta ya no está.'};
+  if(r.b.kind!=='transfer' || r.b.countered) return {ok:false, msg:'No se puede pedir más.'};
+  var ask = Math.round(r.b.amount*1.2/500)*500;
+  if(Math.random()<0.55 && r.bidder.budget>=ask){
+    r.b.amount = ask; r.b.countered = true;
+    return {ok:true, msg:r.bidder.name+' acepta subir a '+fmtMoney(ask)+'. Ahora decidís vos.'};
+  }
+  state.incomingBids = bidsList().filter(function(x){ return x.id!==bidId; });
+  return {ok:true, msg:r.bidder.name+' no quiso subir la oferta y se bajó.'};
+}
+function loanOut(playerId){
+  var club = getMyClub();
+  if(!club) return {ok:false, msg:'No dirigís ningún club.'};
+  var p = club.players.find(function(x){ return x.id===playerId; });
+  if(!p) return {ok:false, msg:'No se encontró al jugador.'};
+  if(p.loanFrom) return {ok:false, msg:p.name+' ya está a préstamo en tu club.'};
+  if(club.players.length<=14) return {ok:false, msg:'No podés: te quedarías con menos de 14 jugadores.'};
+  // un club de igual o menor nivel, donde le den minutos
+  var dest = state.teams.filter(function(t){ return t.id!==club.id && t.tier<=club.tier && t.players.length<25; })
+    .map(function(t){ var same = t.players.filter(function(x){ return x.pos===p.pos; }); var best = same.length? Math.max.apply(null, same.map(overall)) : 0; return {t:t, d:Math.abs(best-overall(p)), lower:best<=overall(p), same:t.leagueId===club.leagueId}; })
+    .sort(function(a,b){ return (b.same-a.same) || (b.lower-a.lower) || (a.d-b.d); });
+  if(!dest.length) return {ok:false, msg:'No apareció ningún club para llevarlo a préstamo.'};
+  var to = dest[rnd(0, Math.min(2, dest.length-1))].t;
+  detachPlayer(club, p.id);
+  p.loanFrom = club.id; p.loanSeason = state.season; p.transferListed = false;
+  to.players.push(p);
+  state.incomingBids = bidsList().filter(function(x){ return x.playerId!==p.id; });
+  pushNews({kind:'transfer', clubId:club.id, playerId:p.id,
+    headline: String(p.name).split(' ').pop().toUpperCase()+' SE VA A PRÉSTAMO AL '+to.name.toUpperCase(),
+    body: p.name+' va a sumar minutos en el '+to.name+' hasta fin de temporada. Vuelve en la pretemporada.',
+    tags:[club.name, to.name, 'Mercado']});
+  return {ok:true, msg:p.name+' se va a préstamo al '+to.name+' hasta fin de temporada.'};
+}
+function requestLoan(){
+  var neg = state.negotiation, myClub = getMyClub();
+  if(!neg || !myClub) return;
+  var owner = state.teams.find(function(t){ return t.id===neg.ownerClubId; });
+  var p = owner? owner.players.find(function(x){ return x.id===neg.playerId; }) : null;
+  if(!p){ neg.status='rejected'; neg.message='El jugador ya no está disponible.'; return; }
+  if(p.loanFrom){ neg.message='Ya está a préstamo: no lo pueden volver a ceder.'; return; }
+  if(myClub.players.length>=23){ neg.message='Tu plantel ya tiene el máximo de 23 jugadores.'; return; }
+  if(owner.lineup.indexOf(p.id)!==-1 && neg.willingness<60){ neg.message='No lo prestan: es titular en el '+owner.name+'.'; return; }
+  var fee = loanFee(p);
+  if(myClub.budget<fee){ neg.message='No tenés presupuesto para el préstamo ('+fmtMoney(fee)+').'; return; }
+  detachPlayer(owner, p.id);
+  if(owner.lineup.length<11) autoLineup(owner);
+  owner.budget += fee; myClub.budget -= fee;
+  p.loanFrom = owner.id; p.loanSeason = state.season;
+  myClub.players.push(p);
+  neg.status = 'done';
+  neg.message = p.name+' llega a préstamo hasta fin de temporada (pagaste '+fmtMoney(fee)+'). Su sueldo lo pagás vos y en la pretemporada vuelve al '+owner.name+'.';
+  pushNews({kind:'transfer', clubId:myClub.id, playerId:p.id,
+    headline: String(p.name).split(' ').pop().toUpperCase()+' LLEGA A PRÉSTAMO AL '+myClub.name.toUpperCase(),
+    body: p.name+' se suma cedido por el '+owner.name+' hasta fin de temporada.',
+    tags:[myClub.name, owner.name, 'Mercado']});
+}
+// pretemporada: cada cedido vuelve a su club; los chicos que jugaron afuera vuelven un poco mejores
+function returnLoans(){
+  var back = [];
+  state.teams.forEach(function(t){
+    t.players.filter(function(p){ return p.loanFrom; }).forEach(function(p){
+      var origin = state.teams.find(function(o){ return o.id===p.loanFrom; });
+      delete p.loanFrom; delete p.loanSeason;
+      if(!origin) return;
+      detachPlayer(t, p.id);
+      if(p.age<=23 && overall(p)<p.potential){ p.atq=clamp(p.atq+1,10,99); p.cre=clamp(p.cre+1,10,99); p.def=clamp(p.def+1,10,99); p.fis=clamp(p.fis+1,10,99); p.por=clamp(p.por+1,10,99); }
+      origin.players.push(p);
+      back.push({p:p, origin:origin, from:t});
+    });
+  });
+  var myClub = getMyClub();
+  back.forEach(function(x){
+    if(myClub && (x.origin.id===myClub.id || x.from.id===myClub.id)){
+      state.ticker = [x.p.name+(x.origin.id===myClub.id? ' vuelve de su préstamo en el '+x.from.name : ' termina su préstamo y vuelve al '+x.origin.name)+'.'].concat(state.ticker||[]).slice(0,40);
+    }
+  });
+  state.incomingBids = [];
+}
+function myLoans(myClub){
+  var out = [], inn = myClub.players.filter(function(p){ return p.loanFrom; });
+  state.teams.forEach(function(t){ t.players.forEach(function(p){ if(p.loanFrom===myClub.id) out.push({p:p, club:t}); }); });
+  return {out:out, inn:inn};
+}
 function listForTransfer(playerId){
   var club = getMyClub();
   if(!club) return {ok:false,msg:'No dirigís ningún club.'};
   var p = club.players.find(function(x){return x.id===playerId;});
   if(!p) return {ok:false,msg:'No se encontró al jugador.'};
+  if(p.loanFrom) return {ok:false,msg:p.name+' está a préstamo: no lo podés poner en venta.'};
   p.transferListed = true;
   p.morale = clamp((p.morale!==undefined?p.morale:75)+5, 0, 100);
   return {ok:true, msg:p.name+' fue puesto en la lista de transferibles.'};
@@ -2627,6 +2909,7 @@ function sellPlayer(playerId){
   if(idx===-1) return {ok:false,msg:'No se encontró al jugador.'};
   if(myClub.players.length<=14) return {ok:false,msg:'No podés vender: te quedarías con menos de 14 jugadores.'};
   var p = myClub.players[idx];
+  if(p.loanFrom) return {ok:false,msg:p.name+' está a préstamo: vuelve a su club a fin de temporada.'};
   var hierarchyBefore = computeHierarchy(myClub);
   var wasLeader = hierarchyBefore.some(function(h){ return h.player.id===p.id && (h.tier==='captain'||h.tier==='leader'); });
   var income = Math.round(p.value*0.7);
@@ -2657,6 +2940,7 @@ function scoutPlayer(playerId, ownerClubId){
   if(!ownerClub) return;
   var player = ownerClub.players.find(function(p){return p.id===playerId;});
   if(!player) return;
+  if(player.loanFrom){ toast(player.name+' está a préstamo en el '+ownerClub.name+': no se puede negociar hasta que vuelva a su club.'); return; }
   var isStarter = ownerClub.lineup.indexOf(playerId)!==-1;
   var ov = overall(player);
   var moraleAdj = player.morale!==undefined? (75-player.morale)*0.3 : 0;
@@ -2844,6 +3128,60 @@ function adjustJobSecurity(myClub, result, oppTier){
   else if(result==='draw') delta = diff>=1? -3 : 2;
   else delta = diff>=0? -10 : -3;
   state.manager.jobSecurity = clamp(state.manager.jobSecurity + delta, 0, 100);
+  var u = state.manager.ultimatum;
+  if(u){ u.points += result==='win'? 3 : result==='draw'? 1 : 0; u.left--; }
+}
+/* la directiva mira la tabla durante la temporada: si estás lejos del objetivo te aprieta,
+   avisa cuando se preocupa y, si la confianza se cae, te da un ultimátum de pocos partidos */
+var ULTIMATUM_MATCHES = 5, ULTIMATUM_POINTS = 7;
+function boardStanding(myClub){
+  var obj = state.manager.boardObjective;
+  if(!obj || !myClub) return null;
+  var pos = standings(myClub.leagueId).findIndex(function(t){ return t.id===myClub.id; })+1;
+  var progress = clamp(state.matchdayIdx/Math.max(1,totalMatchdays()), 0, 1);
+  // a principio de temporada la tabla dice poco: el margen se achica a medida que avanza
+  var slack = Math.round(obj.leagueSize*0.25*(1-progress));
+  var gap = pos - obj.target;
+  var status = gap<=0? 'ok' : gap<=slack? 'tight' : 'bad';
+  return {pos:pos, gap:gap, slack:slack, progress:progress, status:status};
+}
+function boardRisk(){
+  var js = state.manager.jobSecurity;
+  if(state.manager.ultimatum) return {key:'ultimatum', label:'Ultimátum'};
+  if(js<35) return {key:'high', label:'Alto'};
+  if(js<55) return {key:'mid', label:'Medio'};
+  return {key:'low', label:'Bajo'};
+}
+function boardReview(myClub){
+  if(!myClub || !state.manager.clubId) return;
+  var st = boardStanding(myClub);
+  if(st && st.progress>=0.25){
+    if(st.status==='bad') state.manager.jobSecurity = clamp(state.manager.jobSecurity-2, 0, 100);
+    else if(st.status==='ok') state.manager.jobSecurity = clamp(state.manager.jobSecurity+1, 0, 100);
+  }
+  var js = state.manager.jobSecurity, obj = state.manager.boardObjective;
+  if(js<40 && state.manager.boardWarnSeason!==state.season && !state.manager.ultimatum){
+    state.manager.boardWarnSeason = state.season;
+    pushNews({kind:'career', clubId:myClub.id,
+      headline:'LA DIRIGENCIA DEL '+myClub.name.toUpperCase()+' ESTÁ PREOCUPADA',
+      body:'En el club esperaban "'+(obj? obj.label : 'otra cosa')+'"'+(st? ' y el equipo está '+ordinal(st.pos)+(obj? ' (el objetivo es terminar '+ordinal(obj.target)+' o mejor)' : '') : '')+'. Por ahora te bancan, pero si los resultados no aparecen pueden darte un ultimátum.',
+      tags:[myClub.name, 'Directiva']});
+  }
+}
+function startUltimatum(myClub){
+  state.manager.ultimatum = {season:state.season, left:ULTIMATUM_MATCHES, need:ULTIMATUM_POINTS, points:0};
+  state.ticker = ['Ultimátum de la directiva: '+ULTIMATUM_POINTS+' puntos en '+ULTIMATUM_MATCHES+' partidos.'].concat(state.ticker||[]).slice(0,40);
+  pushNews({kind:'career', clubId:myClub.id,
+    headline:'ULTIMÁTUM PARA EL TÉCNICO DEL '+myClub.name.toUpperCase(),
+    body:'La dirigencia se cansó de esperar: tenés '+ULTIMATUM_MATCHES+' partidos para sumar '+ULTIMATUM_POINTS+' puntos (liga y copas cuentan; en las llaves, pasar vale como ganar). Si no, te vas.',
+    tags:[myClub.name, 'Directiva']});
+}
+function ultimatumHTML(){
+  var u = state && state.manager.ultimatum;
+  if(!u || !getMyClub()) return '';
+  return '<div class="card card-feature" style="border-top-color:var(--card-red);"><p class="eyebrow" style="color:var(--card-red);">Ultimátum de la directiva</p>'+
+    '<p class="feature-line"><strong>Llevás '+u.points+' de '+u.need+' puntos</strong> y te quedan '+u.left+' partido'+(u.left===1?'':'s')+'. Si no llegás, te despiden.</p>'+
+    '<p class="feature-line muted">Cuentan liga y copas. En una llave, pasar de ronda vale como ganar.</p></div>';
 }
 function generateJobOffers(){
   var myClub = getMyClub();
@@ -2865,20 +3203,28 @@ function generateJobOffers(){
   });
 }
 function checkFired(){
-  if(state.manager.tenureMatchdays<4) return;
-  var js = state.manager.jobSecurity;
-  var fireChance = 0;
-  if(js<=0) fireChance=1;
-  else if(js<15) fireChance=0.18;
-  else if(js<25) fireChance=0.06;
-  if(Math.random()<fireChance){
-    var club = getMyClub();
+  if(!state.manager.clubId || state.manager.tenureMatchdays<4) return;
+  var js = state.manager.jobSecurity, u = state.manager.ultimatum, fire = false;
+  var club = getMyClub();
+  if(u){
+    if(u.points>=u.need){
+      state.manager.ultimatum = null;
+      state.manager.jobSecurity = Math.max(js, 35);
+      pushNews({kind:'career', clubId:club.id,
+        headline:'LA DIRIGENCIA RATIFICA AL TÉCNICO DEL '+club.name.toUpperCase(),
+        body:'Sumaste '+u.points+' puntos y cumpliste el ultimátum. La directiva te vuelve a dar respaldo, aunque sigue mirando la tabla.',
+        tags:[club.name, 'Directiva']});
+    } else if(u.left<=0 || u.points+u.left*3<u.need) fire = true;
+  } else if(js<=0) fire = true;
+  else if(js<25) startUltimatum(club);
+  if(fire){
     state.manager.history.unshift({season:state.season, event:'Te despidieron de '+club.name+'.'});
     state.manager.history = state.manager.history.slice(0,20);
     state.manager.reputation = Math.max(5, state.manager.reputation-4);
     state.manager.lastLeagueId = club.leagueId;
     state.manager.clubId = null;
     state.manager.jobSecurity = 0;
+    state.manager.ultimatum = null;
     state.negotiation = null;
     state.jobOffers = generateJobOffers();
     flashMessage = 'Te despidieron de '+club.name+'.';
@@ -2918,6 +3264,7 @@ function takeJob(clubId){
   state.manager.tenureMatchdays = 0;
   state.manager.boardObjective = computeBoardObjective(club);
   state.manager.promisesUsed = 0;
+  state.manager.ultimatum = null;
   state.jobOffers = [];
   state.negotiation = null;
   viewingLeagueId = club.leagueId;
@@ -3157,6 +3504,7 @@ function beginMatchday(){
 }
 function rolloverSeason(){
   flushSims();
+  returnLoans();
   var myClub = getMyClub();
   if(myClub){
     var table = standings(myClub.leagueId);
@@ -3260,8 +3608,13 @@ function rolloverSeason(){
       }
     });
     var youthCap = 6;
-    var newYouthCount = clamp(rnd(1,3), 0, Math.max(0, youthCap-keptYouth.length));
-    for(var yni=0; yni<newYouthCount; yni++) keptYouth.push(genYouthPlayer({tier:club.tier, players:survivors, youthPlayers:keptYouth, staff:club.staff}, league));
+    if(myClub && club.id===myClub.id){
+      // tu club: llega una camada entera y elegís a quién te quedás (ver Juveniles)
+      state.youthIntake = makeYouthIntake({tier:club.tier, players:survivors, youthPlayers:keptYouth, staff:club.staff}, league);
+    } else {
+      var newYouthCount = clamp(rnd(1,3), 0, Math.max(0, youthCap-keptYouth.length));
+      for(var yni=0; yni<newYouthCount; yni++) keptYouth.push(genYouthPlayer({tier:club.tier, players:survivors, youthPlayers:keptYouth, staff:club.staff}, league));
+    }
     club.youthPlayers = keptYouth;
 
     while(survivors.length<18){
@@ -3296,6 +3649,9 @@ function rolloverSeason(){
   state.staffMarket = genStaffMarket();
   if(myClub) state.manager.boardObjective = computeBoardObjective(myClub);
   state.manager.promisesUsed = 0;
+  state.manager.ultimatum = null;
+  if(myClub && state.youthIntake && state.youthIntake.season===state.season) newsYouthIntake(myClub);
+  else state.youthIntake = null;
   setupCups(posMap);
 }
 
@@ -3565,8 +3921,34 @@ function assistantRecs(club){
     if(want===cur || !tbl[want]) return;
     list.push({group:'plantel', text:f.label+': '+tbl[want].label+' le queda mejor a tu plantel que '+(tbl[cur]? tbl[cur].label : 'lo actual')+'.', action:f.action, id:want, label:tbl[want].label, order:2});
   });
+  list = list.concat(contractRecsFor(club));
   return {opp:opp, list:list};
 }
+function contractRecsFor(club){
+  var avg = squadAvgOverall(club), xi = club.lineup || [], out = [];
+  club.players.forEach(function(p){
+    var yrs = p.contractYears!==undefined? p.contractYears : 2, ov = overall(p);
+    var key = xi.indexOf(p.id)!==-1 || ov>=avg;
+    if(p.loanFrom) return;
+    if(yrs<=1 && key && p.age<=31){
+      var est = renewalEstimate(p, 3);
+      out.push({group:'contratos', manual:true, text:p.name+' (GEN '+ov+', '+p.age+' años'+(xi.indexOf(p.id)!==-1? ', titular' : '')+') termina contrato esta temporada y se va libre si no renovás. Renovar 3 temporadas: bono de unos '+fmtMoney(est.bonus)+' y salario de '+fmtMoney(est.wage)+'/f.',
+        action:'renew-contract', id:p.id, label:'Renovar', order:3, sort:-ov});
+    } else if(p.raiseAsk){
+      out.push({group:'contratos', manual:true, text:p.name+' pide aumento: cobra '+fmtMoney(p.wage||0)+'/f y quiere '+fmtMoney(p.raiseAsk.want)+'/f. Mientras no se lo des, le baja la moral ('+Math.round(p.morale!==undefined? p.morale : 75)+').',
+        action:'grant-raise', id:p.id, label:'Darle el aumento', order:3, sort:-ov+100});
+    }
+  });
+  out = out.sort(function(a,b){ return a.sort-b.sort; }).slice(0,5);
+  var nb = bidsList().filter(function(b){ return club.players.some(function(p){ return p.id===b.playerId; }); }).length;
+  if(nb) out.push({group:'mercado', manual:true, text:'Tenés '+nb+' oferta'+(nb===1?'':'s')+' de otros clubes por tus jugadores esperando respuesta.', action:'nav', id:'mercado', label:'Ver ofertas', order:3});
+  if(youthIntakePending()){
+    var it = state.youthIntake, gem = it.players.find(function(p){ return p.gem; });
+    out.push({group:'cantera', manual:true, text:'Llegó la camada '+it.season+': '+it.players.length+' chicos a prueba'+(gem? ', y uno viene con fama de joya' : '')+'. Elegí a quiénes sumar a la cantera.', action:'nav', id:'juveniles', label:'Ver la camada', order:3});
+  }
+  return out;
+}
+function autoAssistCount(recs){ return recs.list.filter(function(r){ return !r.manual; }).length; }
 function applyAssistRec(club, r){
   if(r.action==='quick-formation'){ if(FORMATIONS[r.id]){ club.formation = r.id; autoLineup(club); } return; }
   if(r.action==='assist-lineup'){ autoLineup(club); return; }
@@ -3588,11 +3970,15 @@ function assistantOverlayHTML(recs){
         '<button class="btn btn-ghost btn-sm" data-action="'+r.action+'" data-id="'+escapeHtml(r.id)+'" type="button">'+escapeHtml(r.label)+'</button></div>';
     }).join('');
   }
-  var rivalRows = rows('rival'), squadRows = rows('plantel');
+  var rivalRows = rows('rival'), squadRows = rows('plantel'), contractRows = rows('contratos');
+  var nAuto = autoAssistCount(recs);
   var body = recs.list.length
-    ? '<div class="card-actions" style="margin-top:8px;"><button class="btn btn-primary" data-action="assist-apply-all" type="button">Aplicar todo ('+recs.list.length+')</button></div>'+
+    ? (nAuto? '<div class="card-actions" style="margin-top:8px;"><button class="btn btn-primary" data-action="assist-apply-all" type="button">Aplicar todo ('+nAuto+')</button></div>' : '')+
       (rivalRows? '<p class="assist-group">Para el partido contra '+escapeHtml(recs.opp.name)+'</p>'+rivalRows : '')+
-      (squadRows? '<p class="assist-group">Según tu plantel</p>'+squadRows : '')
+      (squadRows? '<p class="assist-group">Según tu plantel</p>'+squadRows : '')+
+      (contractRows? '<p class="assist-group">Contratos (cuestan plata: decidís vos uno por uno)</p>'+contractRows : '')+
+      (rows('mercado')? '<p class="assist-group">Mercado</p>'+rows('mercado') : '')+
+      (rows('cantera')? '<p class="assist-group">Inferiores</p>'+rows('cantera') : '')
     : '<p class="feature-line" style="margin-top:10px;">Está todo como lo armaría tu asistente. Podés jugar tranquilo.</p>';
   return '<div class="overlay-backdrop" data-action="close-assistant">'+
     '<div class="overlay-panel" data-action="noop">'+
@@ -4889,7 +5275,9 @@ function appShellHTML(){
     .map(function(pair){
       var badge = '';
       if(pair[0]==='noticias' && unreadNews()) badge = ' <span class="tab-badge is-count">'+unreadNews()+'</span>';
-      else if(pair[0]==='carrera' && state.jobOffers.length) badge = ' <span class="tab-badge">•</span>';
+      else if(pair[0]==='carrera' && (state.jobOffers.length || state.manager.ultimatum)) badge = ' <span class="tab-badge">•</span>';
+      else if(pair[0]==='juveniles' && youthIntakePending()) badge = ' <span class="tab-badge">•</span>';
+      else if(pair[0]==='mercado' && myClub && bidsList().some(function(b){ return myClub.players.some(function(p){ return p.id===b.playerId; }); })) badge = ' <span class="tab-badge">•</span>';
       else if(pair[0]==='vestuario' && myClub && computeHierarchy(myClub).some(function(h){return h.tier==='discontent' && !h.player.transferListed;})) badge = ' <span class="tab-badge">•</span>';
       return '<button class="side-tab '+(currentView===pair[0]?'is-active':'')+'" data-action="nav" data-id="'+pair[0]+'" type="button"><span>'+pair[1]+'</span>'+badge+'</button>';
     }).join('');
@@ -5023,10 +5411,10 @@ function renderInicio(){
     '<div class="card"><p class="eyebrow">Historial</p><table class="mini-table"><tbody>'+
     state.history.map(function(h){ return '<tr><td>T'+h.season+'</td><td>'+escapeHtml(h.leagueName||'')+'</td><td>Campeón: '+escapeHtml(h.championName)+'</td><td>Vos: '+ordinal(h.myPos)+'</td></tr>'; }).join('')+
     '</tbody></table></div>' : '';
-  return '<div class="view-grid">'+mainCard+pinnedShortcutsCardHTML()+newsFeedCardHTML()+historyHTML+'</div>';
+  return '<div class="view-grid">'+ultimatumHTML()+mainCard+pinnedShortcutsCardHTML()+newsFeedCardHTML()+historyHTML+'</div>';
 }
 function assistQuickBtnHTML(club){
-  var n = assistantVisible()? assistantRecs(club).list.length : 0;
+  var n = assistantVisible()? autoAssistCount(assistantRecs(club)) : 0;
   return n? '<button class="btn btn-ghost" data-action="assist-apply-all" type="button">Aplicar lo que sugiere el asistente ('+n+')</button>' : '';
 }
 function pinnedShortcutsCardHTML(){
@@ -5122,7 +5510,8 @@ function renderCarrera(){
     var curPos = curTable.findIndex(function(t){return t.id===myClub.id;})+1;
     objHTML = '<div class="card"><p class="eyebrow">Objetivo de la junta directiva · Temporada '+boardObj.season+'</p>'+
       '<p class="feature-line"><strong>"'+escapeHtml(boardObj.label)+'"</strong> en '+escapeHtml(boardObj.leagueName)+'.</p>'+
-      '<p class="feature-line muted">Posición actual: '+ordinal(curPos)+' de '+boardObj.leagueSize+' · para cumplir el objetivo necesitás terminar '+ordinal(boardObj.target)+' o mejor.</p></div>';
+      '<p class="feature-line muted">Posición actual: '+ordinal(curPos)+' de '+boardObj.leagueSize+' · para cumplir el objetivo necesitás terminar '+ordinal(boardObj.target)+' o mejor.</p>'+
+      boardMoodHTML(myClub)+'</div>';
   }
   var offersHTML = state.jobOffers.length? ('<div class="card"><p class="eyebrow">Ofertas</p>'+
     state.jobOffers.map(function(o){
@@ -5135,6 +5524,19 @@ function renderCarrera(){
   var historyHTML = state.manager.history.length? '<div class="card"><p class="eyebrow">Historial de carrera</p><ul class="result-list">'+
     state.manager.history.map(function(h){ return '<li>T'+h.season+' — '+escapeHtml(h.event)+'</li>'; }).join('')+'</ul></div>' : '';
   return '<div class="view-grid">'+statusCard+objHTML+offersHTML+historyHTML+'</div>';
+}
+function boardMoodHTML(myClub){
+  var st = boardStanding(myClub), risk = boardRisk();
+  if(!st) return '';
+  var mood = st.progress<0.25? 'Todavía es temprano: la directiva espera a ver cómo arranca la temporada.'
+    : st.status==='ok'? 'La directiva está conforme: vas en camino de cumplir.'
+    : st.status==='tight'? 'Estás cerca, pero por debajo de lo que piden. Les falta poco para ponerse nerviosos.'
+    : 'Estás lejos del objetivo: la directiva te va a ir restando confianza fecha a fecha.';
+  var cls = risk.key==='low'? 'is-good' : risk.key==='mid'? 'is-avg' : 'is-poor';
+  var u = state.manager.ultimatum;
+  return '<p class="feature-line">'+mood+'</p>'+
+    '<p class="feature-line">Riesgo de despido: <span class="rating-badge '+cls+'">'+risk.label+'</span>'+
+    (u? ' · '+u.points+' de '+u.need+' puntos, quedan '+u.left+' partido'+(u.left===1?'':'s') : risk.key==='high'? ' · si la confianza baja de 25 te dan un ultimátum' : '')+'</p>';
 }
 function renderTabla(){
   var myClub = getMyClub();
@@ -5413,12 +5815,25 @@ function renderJuveniles(){
   var youth = myClub.staff.youth;
   var rows = (myClub.youthPlayers||[]).slice().sort(function(a,b){return overall(b)-overall(a);}).map(function(p){
     var ready = p.age>=17;
-    return '<tr><td>'+escapeHtml(p.name)+'</td><td><span class="pos-chip pos-'+p.pos+'">'+p.pos+'</span></td><td class="num">'+p.age+'</td>'+
+    return '<tr><td>'+escapeHtml(p.name)+(p.gem? ' <span class="rating-badge is-great">Joya</span>' : '')+'</td><td><span class="pos-chip pos-'+p.pos+'">'+p.pos+'</span></td><td class="num">'+p.age+'</td>'+
       '<td class="num mono">'+overall(p)+'</td><td class="num mono">'+p.potential+'</td>'+
       '<td>'+(ready? '<span class="rating-badge is-good">Listo</span>' : '<span class="rating-badge is-avg">En desarrollo</span>')+'</td>'+
-      '<td><button class="btn btn-sm btn-primary" data-action="promote-youth" data-id="'+p.id+'" type="button">Promover</button></td></tr>';
+      '<td style="display:flex; gap:6px;"><button class="btn btn-sm btn-primary" data-action="promote-youth" data-id="'+p.id+'" type="button">Promover</button><button class="btn btn-sm btn-ghost" data-action="release-youth" data-id="'+p.id+'" type="button">Dejar libre</button></td></tr>';
   }).join('');
-  return '<div class="view-grid">'+
+  var intakeCard = '';
+  if(youthIntakePending()){
+    var it = state.youthIntake, room = YOUTH_CAP_MINE-(myClub.youthPlayers||[]).length;
+    var iRows = it.players.slice().sort(function(a,b){ return b.potential-a.potential; }).map(function(p){
+      return '<tr><td>'+escapeHtml(p.name)+(p.gem? ' <span class="rating-badge is-great">Joya</span>' : '')+'</td><td><span class="pos-chip pos-'+p.pos+'">'+p.pos+'</span></td><td class="num">'+p.age+'</td>'+
+        '<td class="num mono">'+overall(p)+'</td><td class="num mono">'+p.potential+'</td>'+
+        '<td style="display:flex; gap:6px;"><button class="btn btn-sm btn-primary" data-action="intake-sign" data-id="'+p.id+'" type="button"'+(room<=0?' disabled':'')+'>Sumar</button><button class="btn btn-sm btn-ghost" data-action="intake-pass" data-id="'+p.id+'" type="button">Dejar ir</button></td></tr>';
+    }).join('');
+    intakeCard = '<div class="card card-feature"><p class="eyebrow">Camada '+it.season+' · llegaron '+it.players.length+' chicos a prueba</p>'+
+      '<p class="feature-line muted">Elegí a quiénes sumar a la cantera (lugar para '+Math.max(0,room)+' más, máximo '+YOUTH_CAP_MINE+'). Los que no sumes se van a otro club.</p>'+
+      '<div class="table-wrap"><table class="table"><thead><tr><th>Nombre</th><th>Pos</th><th>Edad</th><th>GEN</th><th>Potencial</th><th></th></tr></thead><tbody>'+iRows+'</tbody></table></div>'+
+      '<div class="card-actions"><button class="btn btn-primary" data-action="intake-best" type="button"'+(room<=0?' disabled':'')+'>Sumar a los de más potencial</button><button class="btn btn-ghost" data-action="intake-close" type="button">Cerrar la prueba</button></div></div>';
+  }
+  return '<div class="view-grid">'+intakeCard+
     '<div class="card"><p class="eyebrow">Director de juveniles</p><p class="feature-line">'+escapeHtml(youth.name)+' ('+youth.age+' años) · Nivel '+staffStars(youth.level)+'</p>'+
     '<p class="feature-line muted">Cuanto mejor tu director de juveniles, mejores prospectos aparecen en la cantera y más rápido progresan hacia su potencial. Podés cambiarlo desde Cuerpo técnico.</p></div>'+
     '<div class="card"><p class="eyebrow">Cantera</p><div class="table-wrap"><table class="table"><thead><tr><th>Nombre</th><th>Pos</th><th>Edad</th><th>GEN</th><th>Potencial</th><th>Estado</th><th></th></tr></thead><tbody>'+
@@ -5480,6 +5895,7 @@ function renderMercado(){
           '<button class="btn btn-ghost btn-sm" data-action="offer-plus20" type="button">Ofertar +20%</button>'+
           '<label class="field-label">Oferta propia<input type="number" min="0" step="1000" data-change="offer-amount" placeholder="'+neg.askingPrice+'" /></label>'+
           '<button class="btn btn-primary btn-sm" data-action="offer-send" type="button">Enviar oferta</button>'+
+          '<button class="btn btn-ghost btn-sm" data-action="request-loan" type="button" title="Hasta fin de temporada; el sueldo lo pagás vos">Pedirlo a préstamo</button>'+
         '</div>'
       ):'')+
       (neg.status==='counter'? '<div class="card-actions"><button class="btn btn-primary btn-sm" data-action="accept-counter" type="button">Aceptar '+fmtMoney(neg.counterOffer)+'</button><button class="btn btn-ghost btn-sm" data-action="withdraw-negotiation" type="button">Retirarse</button></div>':'')+
@@ -5491,8 +5907,28 @@ function renderMercado(){
   var squadRows = myClub.players.slice().sort(function(a,b){return overall(b)-overall(a);}).map(function(p){
     return '<tr><td>'+escapeHtml(p.name)+'</td><td><span class="pos-chip pos-'+p.pos+'">'+p.pos+'</span></td><td class="num">'+p.age+'</td>'+
       '<td class="num mono">'+overall(p)+'</td><td class="num mono">'+fmtMoney(Math.round(p.value*0.7))+'</td>'+
-      '<td><button class="btn btn-sm btn-ghost" data-action="sell-player" data-id="'+p.id+'" type="button">Vender</button></td></tr>';
+      (p.loanFrom? '<td><span class="rating-badge is-avg">A préstamo</span></td>'
+        : '<td style="display:flex; gap:6px;"><button class="btn btn-sm btn-ghost" data-action="sell-player" data-id="'+p.id+'" type="button">Vender</button><button class="btn btn-sm btn-ghost" data-action="loan-out" data-id="'+p.id+'" type="button" title="Se va a otro club hasta fin de temporada y vuelve en la pretemporada">Ceder</button></td>')+'</tr>';
   }).join('');
+  var bids = bidsList().filter(function(b){ return myClub.players.some(function(p){ return p.id===b.playerId; }); });
+  var bidsCard = bids.length? ('<div class="card card-feature"><p class="eyebrow">Ofertas por tus jugadores</p>'+
+    bids.map(function(b){
+      var p = myClub.players.find(function(x){ return x.id===b.playerId; });
+      var bidder = state.teams.find(function(t){ return t.id===b.clubId; });
+      var bl = bidder? LEAGUES_META.find(function(l){ return l.id===bidder.leagueId; }) : null;
+      var left = b.expires-state.matchdayIdx;
+      return '<div class="offer-row"><div><div class="team-chip">'+crestSVG(bidder,20)+'<strong>'+escapeHtml(bidder? bidder.name : '')+'</strong> <span class="muted" style="font-size:12px;">('+escapeHtml(bl? bl.name : '')+')</span></div>'+
+        '<p class="feature-line" style="margin-top:4px;">'+(b.kind==='loan'? 'Pide a préstamo a <strong>'+escapeHtml(p.name)+'</strong> hasta fin de temporada y paga '+fmtMoney(b.amount)+'.' : 'Ofrece <strong>'+fmtMoney(b.amount)+'</strong> por <strong>'+escapeHtml(p.name)+'</strong>.')+'</p>'+
+        '<p class="feature-line muted" style="margin-top:2px;">'+p.pos+' · GEN '+overall(p)+' · '+p.age+' años · valor '+fmtMoney(p.value)+(myClub.lineup.indexOf(p.id)!==-1? ' · titular' : '')+' · vence en '+left+' fecha'+(left===1?'':'s')+'</p></div>'+
+        '<div class="card-actions" style="margin:0;"><button class="btn btn-primary btn-sm" data-action="bid-accept" data-id="'+b.id+'" type="button">Aceptar</button>'+
+        (b.kind==='transfer' && !b.countered? '<button class="btn btn-ghost btn-sm" data-action="bid-counter" data-id="'+b.id+'" type="button">Pedir 20% más</button>' : '')+
+        '<button class="btn btn-ghost btn-sm" data-action="bid-reject" data-id="'+b.id+'" type="button">Rechazar</button></div></div>';
+    }).join('')+'</div>') : '';
+  var loans = myLoans(myClub);
+  var loansCard = (loans.out.length || loans.inn.length)? ('<div class="card"><p class="eyebrow">Préstamos (vuelven en la pretemporada)</p>'+
+    loans.out.map(function(x){ return '<div class="offer-row"><div><span class="pos-chip pos-'+x.p.pos+'">'+x.p.pos+'</span> <strong>'+escapeHtml(x.p.name)+'</strong> <span class="muted" style="font-size:12px;">cedido al '+escapeHtml(x.club.name)+' · GEN '+overall(x.p)+'</span></div></div>'; }).join('')+
+    loans.inn.map(function(p){ var o = state.teams.find(function(t){ return t.id===p.loanFrom; }); return '<div class="offer-row"><div><span class="pos-chip pos-'+p.pos+'">'+p.pos+'</span> <strong>'+escapeHtml(p.name)+'</strong> <span class="muted" style="font-size:12px;">a préstamo desde el '+escapeHtml(o? o.name : '')+' · GEN '+overall(p)+'</span></div></div>'; }).join('')+
+    '</div>') : '';
 
   var recs = scoutRecommendations(myClub);
   var scoutCard = '<div class="card"><p class="eyebrow">Ojeadores · recomendaciones</p>'+
@@ -5569,7 +6005,9 @@ function renderMercado(){
   '</div>';
 
   return '<div class="view-grid"><div class="card card-budget"><p class="eyebrow">Presupuesto disponible</p><p class="budget-figure">'+fmtMoney(myClub.budget)+'</p></div>'+
+    bidsCard+
     negHTML+
+    loansCard+
     scoutCard+
     interestedCard+
     searchCard+
@@ -8135,7 +8573,7 @@ function handleAction(action, id, el){
       if(mcAll && assistantVisible()){
         // cambiar el once puede cambiar lo que conviene contra el rival: se repasa hasta que no quede nada (como mucho tres vueltas)
         for(var pass=0; pass<3; pass++){
-          var recsAll = assistantRecs(mcAll).list.slice().sort(function(a,b){ return a.order-b.order; });
+          var recsAll = assistantRecs(mcAll).list.filter(function(r){ return !r.manual; }).sort(function(a,b){ return a.order-b.order; });
           if(!recsAll.length) break;
           recsAll.forEach(function(r){ applyAssistRec(mcAll, r); });
         }
@@ -8335,14 +8773,25 @@ function handleAction(action, id, el){
       render(); break;
     }
     case 'toggle-starter': { var mc2=getMyClub(); if(mc2) toggleStarter(mc2, id); saveGame(); render(); break; }
+    case 'bid-accept': { var resBa = acceptBid(id); toast(resBa.msg); saveGame(); render(); break; }
+    case 'bid-reject': { var resBr = rejectBid(id); toast(resBr.msg); saveGame(); render(); break; }
+    case 'bid-counter': { var resBc = counterBid(id); toast(resBc.msg); saveGame(); render(); break; }
+    case 'loan-out': { var resLo = loanOut(id); toast(resLo.msg); saveGame(); render(); break; }
+    case 'request-loan': requestLoan(); saveGame(); render(); break;
     case 'sell-player': { var res = sellPlayer(id); flashMessage = res.msg; saveGame(); render(); break; }
     case 'hire-staff-market': { var roleH = el?el.dataset.role:null; var resHire = hireStaffFromMarket(roleH, id); flashMessage = resHire.msg; saveGame(); render(); break; }
     case 'poach-staff': { var roleP = el?el.dataset.role:null; var clubP = el?el.dataset.club:null; var resPoach = poachStaff(roleP, clubP, id); flashMessage = resPoach.msg; saveGame(); render(); break; }
+    case 'intake-sign': { var resIs = intakeSign(id); toast(resIs.msg); saveGame(); render(); break; }
+    case 'intake-pass': intakePass(id); saveGame(); render(); break;
+    case 'intake-best': { var resIb = intakeSignBest(); toast(resIb.msg); saveGame(); render(); break; }
+    case 'intake-close': if(state.youthIntake) state.youthIntake.players = []; saveGame(); render(); break;
+    case 'release-youth': { var resRy = releaseYouth(id); toast(resRy.msg); saveGame(); render(); break; }
     case 'promote-youth': { var resProm = promoteYouthPlayer(id); flashMessage = resProm.msg; saveGame(); render(); break; }
     case 'promise-minutes': { var resPromise = promiseMinutes(id); flashMessage = resPromise.msg; saveGame(); render(); break; }
     case 'list-transfer': { var resList = listForTransfer(id); flashMessage = resList.msg; saveGame(); render(); break; }
-    case 'renew-contract': { var resRenew = renewContract(id, 3, false); flashMessage = resRenew.msg; saveGame(); render(); break; }
-    case 'renew-contract-clause': { var resRenewC = renewContract(id, 3, true); flashMessage = resRenewC.msg; saveGame(); render(); break; }
+    case 'renew-contract': { var resRenew = renewContract(id, 3, false); flashMessage = resRenew.msg; saveGame(); render(); toast(resRenew.msg); break; }
+    case 'grant-raise': { var resRaise = grantRaise(id); flashMessage = resRaise.msg; saveGame(); render(); toast(resRaise.msg); break; }
+    case 'renew-contract-clause': { var resRenewC = renewContract(id, 3, true); flashMessage = resRenewC.msg; saveGame(); render(); toast(resRenewC.msg); break; }
     case 'buy-clause': { var clubBC = el?el.dataset.club:null; var resClause = buyViaReleaseClause(id, clubBC); flashMessage = resClause.msg; saveGame(); render(); break; }
     case 'scout-player': scoutPlayer(id, el?el.dataset.club:null); saveGame(); render(); break;
     case 'offer-market': if(state.negotiation) sendOffer(state.negotiation.playerValue); saveGame(); render(); break;
