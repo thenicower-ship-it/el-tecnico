@@ -2544,6 +2544,7 @@ function finalizeLiveMatch(){
   var oppClub = lm.mySide==='home'? awayClub: homeClub;
   var result = myGoals>oppGoals?'win': myGoals===oppGoals?'draw':'loss';
   adjustJobSecurity(myClub, result, oppClub.tier);
+  boardReview(myClub);
   state.manager.tenureMatchdays++;
   checkFired();
   if(state.manager.clubId) maybeUnsolicitedOffer();
@@ -2886,6 +2887,60 @@ function adjustJobSecurity(myClub, result, oppTier){
   else if(result==='draw') delta = diff>=1? -3 : 2;
   else delta = diff>=0? -10 : -3;
   state.manager.jobSecurity = clamp(state.manager.jobSecurity + delta, 0, 100);
+  var u = state.manager.ultimatum;
+  if(u){ u.points += result==='win'? 3 : result==='draw'? 1 : 0; u.left--; }
+}
+/* la directiva mira la tabla durante la temporada: si estás lejos del objetivo te aprieta,
+   avisa cuando se preocupa y, si la confianza se cae, te da un ultimátum de pocos partidos */
+var ULTIMATUM_MATCHES = 5, ULTIMATUM_POINTS = 7;
+function boardStanding(myClub){
+  var obj = state.manager.boardObjective;
+  if(!obj || !myClub) return null;
+  var pos = standings(myClub.leagueId).findIndex(function(t){ return t.id===myClub.id; })+1;
+  var progress = clamp(state.matchdayIdx/Math.max(1,totalMatchdays()), 0, 1);
+  // a principio de temporada la tabla dice poco: el margen se achica a medida que avanza
+  var slack = Math.round(obj.leagueSize*0.25*(1-progress));
+  var gap = pos - obj.target;
+  var status = gap<=0? 'ok' : gap<=slack? 'tight' : 'bad';
+  return {pos:pos, gap:gap, slack:slack, progress:progress, status:status};
+}
+function boardRisk(){
+  var js = state.manager.jobSecurity;
+  if(state.manager.ultimatum) return {key:'ultimatum', label:'Ultimátum'};
+  if(js<35) return {key:'high', label:'Alto'};
+  if(js<55) return {key:'mid', label:'Medio'};
+  return {key:'low', label:'Bajo'};
+}
+function boardReview(myClub){
+  if(!myClub || !state.manager.clubId) return;
+  var st = boardStanding(myClub);
+  if(st && st.progress>=0.25){
+    if(st.status==='bad') state.manager.jobSecurity = clamp(state.manager.jobSecurity-2, 0, 100);
+    else if(st.status==='ok') state.manager.jobSecurity = clamp(state.manager.jobSecurity+1, 0, 100);
+  }
+  var js = state.manager.jobSecurity, obj = state.manager.boardObjective;
+  if(js<40 && state.manager.boardWarnSeason!==state.season && !state.manager.ultimatum){
+    state.manager.boardWarnSeason = state.season;
+    pushNews({kind:'career', clubId:myClub.id,
+      headline:'LA DIRIGENCIA DEL '+myClub.name.toUpperCase()+' ESTÁ PREOCUPADA',
+      body:'En el club esperaban "'+(obj? obj.label : 'otra cosa')+'"'+(st? ' y el equipo está '+ordinal(st.pos)+(obj? ' (el objetivo es terminar '+ordinal(obj.target)+' o mejor)' : '') : '')+'. Por ahora te bancan, pero si los resultados no aparecen pueden darte un ultimátum.',
+      tags:[myClub.name, 'Directiva']});
+  }
+}
+function startUltimatum(myClub){
+  state.manager.ultimatum = {season:state.season, left:ULTIMATUM_MATCHES, need:ULTIMATUM_POINTS, points:0};
+  state.ticker = ['Ultimátum de la directiva: '+ULTIMATUM_POINTS+' puntos en '+ULTIMATUM_MATCHES+' partidos.'].concat(state.ticker||[]).slice(0,40);
+  pushNews({kind:'career', clubId:myClub.id,
+    headline:'ULTIMÁTUM PARA EL TÉCNICO DEL '+myClub.name.toUpperCase(),
+    body:'La dirigencia se cansó de esperar: tenés '+ULTIMATUM_MATCHES+' partidos para sumar '+ULTIMATUM_POINTS+' puntos (liga y copas cuentan; en las llaves, pasar vale como ganar). Si no, te vas.',
+    tags:[myClub.name, 'Directiva']});
+}
+function ultimatumHTML(){
+  var u = state && state.manager.ultimatum;
+  if(!u || !getMyClub()) return '';
+  return '<div class="card card-feature" style="border-top-color:var(--card-red);"><p class="eyebrow" style="color:var(--card-red);">Ultimátum de la directiva</p>'+
+    '<p class="feature-line"><strong>Llevás '+u.points+' de '+u.need+' puntos</strong> y te quedan '+u.left+' partido'+(u.left===1?'':'s')+'. Si no llegás, te despiden.</p>'+
+    '<p class="feature-line muted">Cuentan liga y copas. En una llave, pasar de ronda vale como ganar.</p></div>';
 }
 function generateJobOffers(){
   var myClub = getMyClub();
@@ -2907,20 +2962,28 @@ function generateJobOffers(){
   });
 }
 function checkFired(){
-  if(state.manager.tenureMatchdays<4) return;
-  var js = state.manager.jobSecurity;
-  var fireChance = 0;
-  if(js<=0) fireChance=1;
-  else if(js<15) fireChance=0.18;
-  else if(js<25) fireChance=0.06;
-  if(Math.random()<fireChance){
-    var club = getMyClub();
+  if(!state.manager.clubId || state.manager.tenureMatchdays<4) return;
+  var js = state.manager.jobSecurity, u = state.manager.ultimatum, fire = false;
+  var club = getMyClub();
+  if(u){
+    if(u.points>=u.need){
+      state.manager.ultimatum = null;
+      state.manager.jobSecurity = Math.max(js, 35);
+      pushNews({kind:'career', clubId:club.id,
+        headline:'LA DIRIGENCIA RATIFICA AL TÉCNICO DEL '+club.name.toUpperCase(),
+        body:'Sumaste '+u.points+' puntos y cumpliste el ultimátum. La directiva te vuelve a dar respaldo, aunque sigue mirando la tabla.',
+        tags:[club.name, 'Directiva']});
+    } else if(u.left<=0 || u.points+u.left*3<u.need) fire = true;
+  } else if(js<=0) fire = true;
+  else if(js<25) startUltimatum(club);
+  if(fire){
     state.manager.history.unshift({season:state.season, event:'Te despidieron de '+club.name+'.'});
     state.manager.history = state.manager.history.slice(0,20);
     state.manager.reputation = Math.max(5, state.manager.reputation-4);
     state.manager.lastLeagueId = club.leagueId;
     state.manager.clubId = null;
     state.manager.jobSecurity = 0;
+    state.manager.ultimatum = null;
     state.negotiation = null;
     state.jobOffers = generateJobOffers();
     flashMessage = 'Te despidieron de '+club.name+'.';
@@ -2960,6 +3023,7 @@ function takeJob(clubId){
   state.manager.tenureMatchdays = 0;
   state.manager.boardObjective = computeBoardObjective(club);
   state.manager.promisesUsed = 0;
+  state.manager.ultimatum = null;
   state.jobOffers = [];
   state.negotiation = null;
   viewingLeagueId = club.leagueId;
@@ -3338,6 +3402,7 @@ function rolloverSeason(){
   state.staffMarket = genStaffMarket();
   if(myClub) state.manager.boardObjective = computeBoardObjective(myClub);
   state.manager.promisesUsed = 0;
+  state.manager.ultimatum = null;
   setupCups(posMap);
 }
 
@@ -4951,7 +5016,7 @@ function appShellHTML(){
     .map(function(pair){
       var badge = '';
       if(pair[0]==='noticias' && unreadNews()) badge = ' <span class="tab-badge is-count">'+unreadNews()+'</span>';
-      else if(pair[0]==='carrera' && state.jobOffers.length) badge = ' <span class="tab-badge">•</span>';
+      else if(pair[0]==='carrera' && (state.jobOffers.length || state.manager.ultimatum)) badge = ' <span class="tab-badge">•</span>';
       else if(pair[0]==='vestuario' && myClub && computeHierarchy(myClub).some(function(h){return h.tier==='discontent' && !h.player.transferListed;})) badge = ' <span class="tab-badge">•</span>';
       return '<button class="side-tab '+(currentView===pair[0]?'is-active':'')+'" data-action="nav" data-id="'+pair[0]+'" type="button"><span>'+pair[1]+'</span>'+badge+'</button>';
     }).join('');
@@ -5085,7 +5150,7 @@ function renderInicio(){
     '<div class="card"><p class="eyebrow">Historial</p><table class="mini-table"><tbody>'+
     state.history.map(function(h){ return '<tr><td>T'+h.season+'</td><td>'+escapeHtml(h.leagueName||'')+'</td><td>Campeón: '+escapeHtml(h.championName)+'</td><td>Vos: '+ordinal(h.myPos)+'</td></tr>'; }).join('')+
     '</tbody></table></div>' : '';
-  return '<div class="view-grid">'+mainCard+pinnedShortcutsCardHTML()+newsFeedCardHTML()+historyHTML+'</div>';
+  return '<div class="view-grid">'+ultimatumHTML()+mainCard+pinnedShortcutsCardHTML()+newsFeedCardHTML()+historyHTML+'</div>';
 }
 function assistQuickBtnHTML(club){
   var n = assistantVisible()? autoAssistCount(assistantRecs(club)) : 0;
@@ -5184,7 +5249,8 @@ function renderCarrera(){
     var curPos = curTable.findIndex(function(t){return t.id===myClub.id;})+1;
     objHTML = '<div class="card"><p class="eyebrow">Objetivo de la junta directiva · Temporada '+boardObj.season+'</p>'+
       '<p class="feature-line"><strong>"'+escapeHtml(boardObj.label)+'"</strong> en '+escapeHtml(boardObj.leagueName)+'.</p>'+
-      '<p class="feature-line muted">Posición actual: '+ordinal(curPos)+' de '+boardObj.leagueSize+' · para cumplir el objetivo necesitás terminar '+ordinal(boardObj.target)+' o mejor.</p></div>';
+      '<p class="feature-line muted">Posición actual: '+ordinal(curPos)+' de '+boardObj.leagueSize+' · para cumplir el objetivo necesitás terminar '+ordinal(boardObj.target)+' o mejor.</p>'+
+      boardMoodHTML(myClub)+'</div>';
   }
   var offersHTML = state.jobOffers.length? ('<div class="card"><p class="eyebrow">Ofertas</p>'+
     state.jobOffers.map(function(o){
@@ -5197,6 +5263,19 @@ function renderCarrera(){
   var historyHTML = state.manager.history.length? '<div class="card"><p class="eyebrow">Historial de carrera</p><ul class="result-list">'+
     state.manager.history.map(function(h){ return '<li>T'+h.season+' — '+escapeHtml(h.event)+'</li>'; }).join('')+'</ul></div>' : '';
   return '<div class="view-grid">'+statusCard+objHTML+offersHTML+historyHTML+'</div>';
+}
+function boardMoodHTML(myClub){
+  var st = boardStanding(myClub), risk = boardRisk();
+  if(!st) return '';
+  var mood = st.progress<0.25? 'Todavía es temprano: la directiva espera a ver cómo arranca la temporada.'
+    : st.status==='ok'? 'La directiva está conforme: vas en camino de cumplir.'
+    : st.status==='tight'? 'Estás cerca, pero por debajo de lo que piden. Les falta poco para ponerse nerviosos.'
+    : 'Estás lejos del objetivo: la directiva te va a ir restando confianza fecha a fecha.';
+  var cls = risk.key==='low'? 'is-good' : risk.key==='mid'? 'is-avg' : 'is-poor';
+  var u = state.manager.ultimatum;
+  return '<p class="feature-line">'+mood+'</p>'+
+    '<p class="feature-line">Riesgo de despido: <span class="rating-badge '+cls+'">'+risk.label+'</span>'+
+    (u? ' · '+u.points+' de '+u.need+' puntos, quedan '+u.left+' partido'+(u.left===1?'':'s') : risk.key==='high'? ' · si la confianza baja de 25 te dan un ultimátum' : '')+'</p>';
 }
 function renderTabla(){
   var myClub = getMyClub();
