@@ -1,6 +1,6 @@
 <!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1"><style>:root{color-scheme:light}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="color-scheme" content="dark" />
 <meta name="theme-color" content="#0d1119" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -471,6 +471,39 @@ input[type="text"].search-input{ width:100%; margin:4px 0 6px; background:var(--
   .table{ font-size:12px; }
   .ev-label{ width:64px; }
   .feature-title{ font-size:24px; }
+}
+
+/* v59: sonido del partido */
+.pitch-snd-toggle{ position:absolute; left:10px; bottom:10px; z-index:3; display:flex; align-items:center; gap:5px; font:600 11px/1 'Inter',sans-serif; color:rgba(255,255,255,0.85); background:rgba(12,15,20,0.72); border:1px solid rgba(255,255,255,0.18); border-radius:999px; padding:5px 10px 5px 8px; cursor:pointer; }
+.pitch-snd-toggle svg{ width:14px; height:14px; }
+.pitch-snd-toggle.is-off{ color:rgba(255,255,255,0.55); }
+/* v59: muescas del iPhone en horizontal */
+.app-shell{ padding-left:env(safe-area-inset-left); padding-right:env(safe-area-inset-right); }
+/* v59: jugar en horizontal (celular acostado) */
+@media (orientation:landscape) and (max-height:540px){
+  .sidebar{ padding:8px 12px; gap:6px 12px; }
+  .side-nav{ flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none; }
+  .side-nav::-webkit-scrollbar{ display:none; }
+  .side-tab{ flex:0 0 auto; white-space:nowrap; padding:6px 9px; }
+  .main-inner{ padding-left:14px; padding-right:14px; }
+  .app-shell.is-live .sidebar-brand, .app-shell.is-live .sidebar-tools, .app-shell.is-live .sidebar-club, .app-shell.is-live .sidebar-footer, .app-shell.is-live .ticker{ display:none; }
+  .app-shell.is-live .sidebar{ padding:4px 10px; }
+  .app-shell.is-live .main-inner{ padding:6px 8px 24px; }
+  .app-shell.is-live .view-grid{ gap:10px; }
+  .app-shell.is-live .live-header{ --lpw:min(58vw, calc((100vh - 30px) * 1.514)); --lpw:min(58vw, calc((100dvh - 30px) * 1.514)); display:grid; grid-template-columns:var(--lpw) minmax(0,1fr); column-gap:14px; align-items:start; padding:8px 10px; }
+  .app-shell.is-live .live-header > *{ grid-column:2; min-width:0; }
+  .app-shell.is-live .live-header > .pitch-wrap{ grid-column:1; grid-row:1 / span 40; align-self:start; position:sticky; top:4px; margin:0; max-width:none; }
+  .app-shell.is-live .live-header > .commentary-banner{ margin-top:0; font-size:12px; padding:7px 10px; }
+  .app-shell.is-live .live-scorebox{ position:sticky; top:0; z-index:4; background:var(--surface); padding:4px 0 2px; }
+  .app-shell.is-live .live-topline{ flex-wrap:wrap; gap:8px; margin-bottom:4px; }
+  .app-shell.is-live .score-line{ font-size:15px; gap:8px; margin:0 0 4px; }
+  .app-shell.is-live .score-figure{ font-size:30px; }
+  .app-shell.is-live .goal-flash{ font-size:19px; margin:4px 0; }
+  .app-shell.is-live .live-header .feature-line{ font-size:12px; }
+  .app-shell.is-live .live-header .card-actions{ flex-wrap:wrap; }
+  .app-shell.is-live .live-header .chip-row{ flex-wrap:wrap; }
+  .app-shell.is-live .live-assist{ margin-top:8px; padding:8px 10px; }
+  .app-shell.is-live .live-assist-row{ flex-direction:column; align-items:stretch; }
 }
 </style>
 <div id="root"></div>
@@ -2545,11 +2578,13 @@ function liveMinuteTick(){
     if(lm.ko && !lm.extraTime && lm.homeGoals===lm.awayGoals){
       startExtraTime(lm, homeClub, awayClub);
       if(ENGINE_HEADLESS) return;
+      sndWhistle('half');
       lm.status = 'paused';
       saveGame();
       return;
     }
     if(ENGINE_HEADLESS){ lm.finished = true; return; }
+    sndWhistle('end');
     finalizeLiveMatch();
     saveGame();
     return;
@@ -2569,6 +2604,7 @@ function liveMinuteTick(){
       if(anim){ animReconcile(lm, homeClub, awayClub); anim.secondHalf = true; animKickoff('away'); }
       return;
     }
+    sndWhistle('half');
     lm.status = 'paused';
     if(anim){
       animReconcile(lm, homeClub, awayClub);
@@ -5180,9 +5216,222 @@ function animLoop(ts){
   if(mode!==anim.lastMode){ anim.lastMode = mode; anim.needRender = true; }
   if(anim.needRender) render();
   animPaint();
+  sndTick();
   if(animRaf!==null && state.liveMatch && state.liveMatch.status==='playing' && currentView==='partido') animRaf = requestAnimationFrame(animLoop);
   else animRaf = null;
 }
+/* ---------- v59: sonido del partido (Web Audio, todo sintetizado) ---------- */
+var SND = {on:true, ctx:null, master:null, noise:null, amb:null, ambGain:null, ambFilter:null, ambLevel:0, lastWhistle:0, kickKey:null, shownKey:null, shownGoals:-1, swayAt:0, sway:1};
+try{ SND.on = localStorage.getItem('elTecnicoSound')!=='off'; }catch(e){}
+function sndToggleHTML(){
+  var wave = SND.on? '<path d="M10.5 5.5a3.5 3.5 0 0 1 0 5M12.5 3.5a6.5 6.5 0 0 1 0 9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' : '<path d="M10.5 6l4 4M14.5 6l-4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>';
+  return '<button class="pitch-snd-toggle'+(SND.on?'':' is-off')+'" data-action="snd-toggle" type="button" aria-pressed="'+(SND.on?'true':'false')+'" title="'+(SND.on?'Silenciar el partido':'Activar el sonido del partido')+'">'+
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6h2.5L8 3v10L4.5 10H2z" fill="currentColor"/>'+wave+'</svg>'+(SND.on?'Sonido':'Sin sonido')+'</button>';
+}
+function sndToggle(){
+  SND.on = !SND.on;
+  try{ localStorage.setItem('elTecnicoSound', SND.on? 'on' : 'off'); }catch(e){}
+  if(SND.on) sndUnlock();
+  else if(SND.master && SND.ctx) SND.master.gain.setTargetAtTime(0, SND.ctx.currentTime, 0.05);
+  if(SND.on && SND.master && SND.ctx) SND.master.gain.setTargetAtTime(0.9, SND.ctx.currentTime, 0.05);
+  liveDeviceSync();
+}
+// el audio arranca con un toque del usuario (iOS no deja antes)
+function sndUnlock(){
+  if(!SND.on) return;
+  var AC = window.AudioContext || window.webkitAudioContext;
+  if(!AC) return;
+  try{
+    // en iPhone, que suene aunque esté la llave de silencio
+    if(navigator.audioSession && navigator.audioSession.type!=='playback') navigator.audioSession.type = 'playback';
+  }catch(e){}
+  try{
+    if(!SND.ctx){
+      SND.ctx = new AC();
+      SND.master = SND.ctx.createGain(); SND.master.gain.value = 0.9;
+      var comp = SND.ctx.createDynamicsCompressor();
+      SND.master.connect(comp); comp.connect(SND.ctx.destination);
+      var len = SND.ctx.sampleRate*4, buf = SND.ctx.createBuffer(2, len, SND.ctx.sampleRate);
+      for(var ch=0; ch<2; ch++){
+        var d = buf.getChannelData(ch), b0=0, b1=0, b2=0;
+        for(var i=0;i<len;i++){ var w = Math.random()*2-1; b0 = 0.997*b0 + w*0.029; b1 = 0.985*b1 + w*0.032; b2 = 0.950*b2 + w*0.048; d[i] = (b0+b1+b2+w*0.02)*0.9; }
+      }
+      SND.noise = buf;
+      var one = SND.ctx.createBufferSource(); one.buffer = SND.ctx.createBuffer(1,1,22050); one.connect(SND.ctx.destination); one.start(0);
+    }
+    if(SND.ctx.state!=='running') SND.ctx.resume();
+  }catch(e){ SND.ctx = null; }
+}
+function sndReady(){ return SND.on && SND.ctx && SND.ctx.state==='running' && document.visibilityState!=='hidden'; }
+// solo lo que se ve en pantalla suena: nunca los partidos de otras canchas
+function sndLive(){
+  if(ENGINE_HEADLESS || !state || !state.liveMatch || currentView!=='partido' || !sndReady()) return false;
+  var sp = state.liveMatch.speed||'normal';
+  return sp==='normal' || sp==='fast';
+}
+function sndNoiseSrc(){ var s = SND.ctx.createBufferSource(); s.buffer = SND.noise; s.loop = true; s.loopStart = Math.random()*3; return s; }
+function sndAmbient(level){
+  if(!SND.ctx || !SND.noise) return;
+  var t = SND.ctx.currentTime;
+  if(level>0 && !SND.amb && sndReady()){
+    var src = sndNoiseSrc(), bp = SND.ctx.createBiquadFilter(), lp = SND.ctx.createBiquadFilter(), g = SND.ctx.createGain();
+    bp.type = 'bandpass'; bp.frequency.value = 650; bp.Q.value = 0.55;
+    lp.type = 'lowpass'; lp.frequency.value = 2600;
+    g.gain.value = 0;
+    src.connect(bp); bp.connect(lp); lp.connect(g); g.connect(SND.master);
+    src.start(t, Math.random()*3);
+    SND.amb = src; SND.ambGain = g; SND.ambFilter = bp;
+  }
+  if(!SND.amb) return;
+  if(level<=0){
+    var old = SND.amb, oldG = SND.ambGain;
+    oldG.gain.setTargetAtTime(0, t, 0.25);
+    setTimeout(function(){ try{ old.stop(); old.disconnect(); }catch(e){} }, 1500);
+    SND.amb = null; SND.ambGain = null; SND.ambFilter = null; SND.ambLevel = 0;
+    return;
+  }
+  SND.ambLevel = level;
+  SND.ambGain.gain.setTargetAtTime(level, t, 0.6);
+  SND.ambFilter.frequency.setTargetAtTime(560 + level*1400, t, 0.8);
+}
+function sndEnv(g, t, peak, attack, hold, release){
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(peak, t+attack);
+  g.gain.setValueAtTime(peak, t+attack+hold);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+attack+hold+release);
+}
+// silbato del árbitro: una o varias pitadas
+function sndWhistle(kind){
+  // los pitazos de inicio, entretiempo y final suenan también en 'Jugadas clave'
+  if(kind==='foul'? !sndLive() : (ENGINE_HEADLESS || !state || !state.liveMatch || currentView!=='partido' || !sndReady())) return;
+  var now = performance.now();
+  if(kind==='foul' && now-SND.lastWhistle < 900) return;
+  SND.lastWhistle = now;
+  var pattern = kind==='end'? [[0,0.38],[0.55,0.38],[1.1,1.15]] : kind==='half'? [[0,0.45],[0.62,0.95]] : kind==='kickoff'? [[0,0.6]] : [[0,0.24+Math.random()*0.12]];
+  var t0 = SND.ctx.currentTime + 0.02;
+  pattern.forEach(function(p){
+    var t = t0+p[0], dur = p[1];
+    var o = SND.ctx.createOscillator(), lfo = SND.ctx.createOscillator(), lfoG = SND.ctx.createGain(), g = SND.ctx.createGain(), trem = SND.ctx.createGain(), tremG = SND.ctx.createGain();
+    o.type = 'sine'; o.frequency.value = 2950 + Math.random()*120;
+    lfo.type = 'sine'; lfo.frequency.value = 28 + Math.random()*8; lfoG.gain.value = 140;
+    lfo.connect(lfoG); lfoG.connect(o.frequency);
+    tremG.gain.value = 0.35; lfo.connect(tremG); trem.gain.value = 0.65; tremG.connect(trem.gain);
+    o.connect(trem); trem.connect(g); g.connect(SND.master);
+    sndEnv(g, t, kind==='foul'? 0.13 : 0.17, 0.02, Math.max(0.01, dur-0.1), 0.08);
+    o.start(t); lfo.start(t); o.stop(t+dur+0.1); lfo.stop(t+dur+0.1);
+  });
+}
+// la hinchada: grito de gol, o el "uhhh" de la que casi entra
+function sndCrowd(peak, attack, hold, release, f0, f1){
+  var t = SND.ctx.currentTime + 0.03;
+  var src = sndNoiseSrc(), bp = SND.ctx.createBiquadFilter(), bp2 = SND.ctx.createBiquadFilter(), g = SND.ctx.createGain(), g2 = SND.ctx.createGain();
+  bp.type = 'bandpass'; bp.Q.value = 0.8; bp.frequency.setValueAtTime(f0, t); bp.frequency.linearRampToValueAtTime(f1, t+attack+hold*0.5); bp.frequency.linearRampToValueAtTime(f0*0.9, t+attack+hold+release);
+  bp2.type = 'bandpass'; bp2.Q.value = 1.2; bp2.frequency.setValueAtTime(f1*1.9, t);
+  g2.gain.value = 0.35;
+  src.connect(bp); bp.connect(g); src.connect(bp2); bp2.connect(g2); g2.connect(g); g.connect(SND.master);
+  sndEnv(g, t, peak, attack, hold, release);
+  src.start(t, Math.random()*3); src.stop(t+attack+hold+release+0.1);
+}
+function sndGoal(side){
+  if(!sndLive()) return;
+  var home = side==='home';
+  if(home) sndCrowd(1.1, 0.18, 2.6, 3.2, 700, 1350);
+  else sndCrowd(0.42, 0.25, 1.4, 2.0, 650, 1150);
+}
+function sndChance(side, outcome, xg){
+  if(!sndLive()) return;
+  if(outcome==='desviado' && xg<0.1) return;
+  if(outcome==='bloqueado') return;
+  var k = (side==='home'? 1 : 0.6) * (outcome==='palo'? 1 : outcome==='atajada'? 0.8 : 0.55);
+  setTimeout(function(){ if(sndLive()) sndCrowd(0.55*k, 0.22, 0.35, 0.9, 380, 620); }, 220);
+}
+// cada cuadro: la hinchada sube cuando la pelota se acerca al arco
+function sndTick(){
+  var lm = state && state.liveMatch;
+  if(!lm || !anim || !sndReady()) return;
+  var sp = lm.speed||'normal';
+  var key = animMatchKey(lm);
+  // pitazo inicial y del segundo tiempo
+  var kk = key+':'+(lm.clock>=halfEnd(lm)? 2 : 1)+(lm.extraTime? 'e' : '');
+  if(SND.kickKey!==kk && lm.status==='playing'){
+    if(lm.clock===0 || lm.clock===halfEnd(lm) || isExtraBreak(lm)) sndWhistle('kickoff');
+    SND.kickKey = kk;
+  }
+  // en jugadas clave el gol se canta cuando se ve
+  var sc = liveShownScore(lm), goals = sc.h + sc.a;
+  if(SND.shownKey!==key){ SND.shownKey = key; SND.shownGoals = goals; }
+  else if(goals>SND.shownGoals){
+    if(sp==='keymoments' && SND.on && !ENGINE_HEADLESS) { var prev = SND.shownH||0; sndGoalShown(sc.h>prev? 'home' : 'away'); }
+    SND.shownGoals = goals;
+  }
+  SND.shownH = sc.h;
+  var lvl = 0.10;
+  if(anim.ball && !anim.replay){
+    var side = anim.poss || 'home';
+    var adv = animAdvance(side, anim.ball.x);
+    var ex = clamp((adv-45)/50, 0, 1);
+    lvl = 0.09 + ex*ex*(side==='home'? 0.22 : 0.12) + (anim.setPiece? 0.04 : 0);
+  }
+  var now = performance.now();
+  if(now>SND.swayAt){ SND.swayAt = now + 700 + Math.random()*1600; SND.sway = 0.8 + Math.random()*0.4; }
+  lvl *= SND.sway;
+  if(Math.abs(lvl-SND.ambLevel)>0.01 || !SND.amb) sndAmbient(lvl);
+}
+function sndGoalShown(side){
+  if(!sndReady() || currentView!=='partido') return;
+  if(side==='home') sndCrowd(1.1, 0.18, 2.6, 3.2, 700, 1350);
+  else sndCrowd(0.42, 0.25, 1.4, 2.0, 650, 1150);
+}
+
+/* ---------- v59: que la pantalla no se apague durante el partido ---------- */
+var WL = {want:false, lock:null, pending:false, video:null};
+var WL_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+function wlVideo(on){
+  // plan B (iPhone viejo o sin permiso): un video mudo e invisible en loop mantiene la pantalla prendida
+  if(on){
+    if(!WL.video){
+      var v = document.createElement('video');
+      v.setAttribute('playsinline',''); v.setAttribute('muted',''); v.muted = true; v.loop = true;
+      v.setAttribute('aria-hidden','true');
+      v.style.cssText = 'position:fixed;left:0;bottom:0;width:2px;height:2px;opacity:0.01;pointer-events:none;z-index:-1;';
+      v.src = 'data:video/mp4;base64,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';
+      document.body.appendChild(v);
+      WL.video = v;
+    }
+    if(WL.video.paused){ var p = WL.video.play(); if(p && p.catch) p.catch(function(){}); }
+  } else if(WL.video && !WL.video.paused){ WL.video.pause(); }
+}
+function wlSync(want){
+  WL.want = want;
+  if(!want){
+    if(WL.lock){ try{ WL.lock.release(); }catch(e){} WL.lock = null; }
+    wlVideo(false);
+    return;
+  }
+  if(document.visibilityState!=='visible') return;
+  if(WL_IOS || !('wakeLock' in navigator)) wlVideo(true);
+  if('wakeLock' in navigator && !WL.lock && !WL.pending){
+    WL.pending = true;
+    navigator.wakeLock.request('screen').then(function(l){
+      WL.pending = false; WL.lock = l;
+      l.addEventListener('release', function(){ if(WL.lock===l) WL.lock = null; });
+      if(!WL.want){ try{ l.release(); }catch(e){} WL.lock = null; }
+    }).catch(function(){ WL.pending = false; if(WL.want) wlVideo(true); });
+  }
+}
+// partido en pantalla: pantalla prendida y la hinchada sonando
+function liveDeviceSync(){
+  var lm = state && state.liveMatch;
+  var onMatch = !!(lm && currentView==='partido' && !lm.finished);
+  wlSync(onMatch);
+  if(!SND.ctx) return;
+  if(!onMatch || !SND.on || document.visibilityState==='hidden') sndAmbient(0);
+  else if(lm.status!=='playing') sndAmbient(0.06);
+}
+document.addEventListener('visibilitychange', function(){
+  if(document.visibilityState==='visible'){ WL.lock = null; liveDeviceSync(); }
+  else sndAmbient(0);
+});
 function startPitchAnim(){
   if(animRaf) return;
   animLastTs = 0;
@@ -5199,6 +5448,7 @@ function render(){
   animBoundSvg = null;
   if(currentView==='partido' && state.liveMatch && state.liveMatch.status==='playing') startPitchAnim();
   else stopPitchAnim();
+  liveDeviceSync();
 }
 function setupScreenHTML(){
   var migration = migrationDismissed? null : getMigration();
@@ -5328,7 +5578,7 @@ function appShellHTML(){
   var clubBlockHTML = myClub
     ? crestSVG(myClub,32)+'<div><div class="sidebar-club-name">'+escapeHtml(myClub.name)+'</div><div class="sidebar-club-league">'+(league?escapeHtml(league.name):'')+'</div></div>'
     : '<div class="sidebar-club-name">Sin club</div>';
-  return '<div class="app-shell">'+
+  return '<div class="app-shell'+(currentView==='partido' && state.liveMatch? ' is-live' : '')+'">'+
     '<aside class="sidebar">'+
       '<div class="sidebar-brand"><span class="brand-mark">ET</span><span class="wordmark">El Técnico</span></div>'+
       '<div class="sidebar-tools">'+
@@ -6924,6 +7174,7 @@ function animTakeOn(holder, def){
 // falta: suma al conteo, puede haber tarjeta y se para la pelota donde fue (o penal)
 function animFoul(fouler, victim){
   engStat(fouler.side, 'Fouls');
+  sndWhistle('foul');
   var vAdv = animAdvance(victim.side, victim.x);
   var inBox = animInBox(victim.side, victim);
   var danger = vAdv>70? 1.5 : vAdv>50? 1.1 : 0.8;
@@ -7166,6 +7417,7 @@ function animShoot(holder, opts){
   var lines = ANIM_SHOT_LINES[outcome] || ANIM_SHOT_LINES.desviado;
   if(opts.penalty && outcome!=='goal') animSay(outcome==='atajada'? '¡El arquero le ataja el penal a '+animName(holder)+'!' : '¡'+animName(holder)+' tira el penal afuera!', side);
   else animSay((opts.header? '¡Cabezazo de '+animName(holder)+'! ' : '') + choice(lines).replace('{A}', animName(holder)), side);
+  if(outcome!=='goal') sndChance(side, outcome, xg);
   var gx = animGoalX(side);
   var gy = clamp(50 + rnd(-4,4), 45, 55);
   if(outcome==='bloqueado'){
@@ -7226,6 +7478,7 @@ function animGoal(scorer, assist, subtype, shot){
   engRate(animKeeper(rivalSide), subtype==='penal'? -0.12 : -0.32);
   lm.flashTeam = side; lm.flashTicks = 3;
   lm.attackMomentum = side==='home'? 85 : -85;
+  sndGoal(side);
   var club = side==='home'? anim.homeClub : anim.awayClub;
   var tally = (scorer.player.goals||0) + lm.events.filter(function(e){ return e.type==='goal' && e.playerId===scorer.id; }).length;
   animShowCard(club, scorer.player, tally===1? '1.º gol en la temporada' : tally+'.º gol en la temporada', null, 3.6);
@@ -8199,6 +8452,7 @@ function renderPitchSVG(lm, homeClub, awayClub){
   return '<div class="'+wrapCls+'"'+wrapStyle+'>'+repHTML+cardHTML+'<svg class="pitch-svg" viewBox="'+pitchViewBox()+'">'+
     pitchFieldSVG()+'<g data-anim="trail"></g><g data-anim="fx"></g>'+refsSVG+homeDots+awayDots+carrierLabel+labelsSVG+ballShadow+ball+
   '</svg>'+
+  sndToggleHTML()+
   '<div class="pitch-cam-toggle"><button class="pitch-cam-btn'+(pitchCamMode==='full'?' is-active':'')+'" data-action="pitch-cam" data-id="full" type="button">Cancha entera</button>'+
   '<button class="pitch-cam-btn'+(pitchCamMode==='cam'?' is-active':'')+'" data-action="pitch-cam" data-id="cam" type="button">Cámara</button></div>'+
   '</div>'+
@@ -8368,8 +8622,8 @@ function renderLiveMatch(){
   var subHintHTML = '';
 
   var headerCard = '<div class="card card-feature live-header">'+
-    '<div class="live-topline">'+statusBadge+'<span class="live-clock mono">'+lm.clock+"'</span>"+addedTimeBadge(lm)+(lm.cup? '<span class="live-comp">'+escapeHtml(cupMatchLabel(lm.cup.compId, lm.cup.stage))+'</span>' : '')+'</div>'+
-    '<h2 class="score-line"><span class="score-team">'+crestSVG(homeClub,28)+'<span>'+escapeHtml(lm.homeName)+'</span></span><span class="score-figure mono">'+shownScore.h+' - '+shownScore.a+'</span><span class="score-team">'+crestSVG(awayClub,28)+'<span>'+escapeHtml(lm.awayName)+'</span></span></h2>'+
+    '<div class="live-scorebox"><div class="live-topline">'+statusBadge+'<span class="live-clock mono">'+lm.clock+"'</span>"+addedTimeBadge(lm)+(lm.cup? '<span class="live-comp">'+escapeHtml(cupMatchLabel(lm.cup.compId, lm.cup.stage))+'</span>' : '')+'</div>'+
+    '<h2 class="score-line"><span class="score-team">'+crestSVG(homeClub,28)+'<span>'+escapeHtml(lm.homeName)+'</span></span><span class="score-figure mono">'+shownScore.h+' - '+shownScore.a+'</span><span class="score-team">'+crestSVG(awayClub,28)+'<span>'+escapeHtml(lm.awayName)+'</span></span></h2></div>'+
     flashHTML+
     renderPitchSVG(lm, homeClub, awayClub)+
     (isPaused? '' : liveAssistHTML(lm))+
@@ -8587,6 +8841,7 @@ function handleAction(action, id, el){
       if(id==='partido') startLiveTicker();
       break;
     case 'pitch-cam': pitchSetCam(id); render(); break;
+    case 'snd-toggle': sndToggle(); render(); break;
     case 'skip-replay':
       if(anim){
         var skippedGoal = anim.replay && anim.replay.kind==='highlight' && anim.replay.goal;
@@ -8943,8 +9198,12 @@ function handleChange(changeType, value, el){
 }
 document.addEventListener('click', function(e){
   var el = e.target.closest('[data-action]');
-  if(!el) return;
-  handleAction(el.dataset.action, el.dataset.id, el);
+  if(el) handleAction(el.dataset.action, el.dataset.id, el);
+  // el toque del usuario habilita el audio y el plan B de pantalla (solo con partido en pantalla)
+  if(state && state.liveMatch && currentView==='partido'){
+    sndUnlock();
+    if(WL.want && WL.video && WL.video.paused) wlVideo(true);
+  }
 });
 document.addEventListener('change', function(e){
   var el = e.target.closest('[data-change]');
