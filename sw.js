@@ -1,6 +1,6 @@
 // Guarda el juego en el telefono para abrirlo sin señal. La pagina se busca primero en internet
 // (asi llegan las versiones nuevas) y si no hay señal en 3 segundos se usa la copia guardada.
-var C="et-a09581df1e",FILES=["./","index.html","manifest.json","icon-180-v2.png","icon-192-v2.png","icon-512-v2.png"];
+var C="et-064a1ed773",FILES=["./","index.html","manifest.json","icon-180-v2.png","icon-192-v2.png","icon-512-v2.png"];
 self.addEventListener("install",function(e){e.waitUntil(caches.open(C).then(function(c){return c.addAll(FILES)}).then(function(){return self.skipWaiting()}))});
 self.addEventListener("activate",function(e){e.waitUntil(caches.keys().then(function(k){return Promise.all(k.filter(function(n){return n!==C}).map(function(n){return caches.delete(n)}))}).then(function(){return self.clients.claim()}))});
 self.addEventListener("fetch",function(e){
