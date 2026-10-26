@@ -6434,7 +6434,7 @@ var ENGINE_FOUL_SHARE = 0.22;
 var ENGINE_STEP = 1/30;
 var ENGINE_HEADLESS = false;
 // cuántas ganas de patear tiene el que llega con la pelota a zona de remate (calibrado)
-var ENGINE_SHOT_EAGERNESS = 0.23;
+var ENGINE_SHOT_EAGERNESS = 0.135;
 var ENGINE_HEAT_MIN = 15;
 // cada liga juega distinto: remates (shot) y puntería (fin) ajustados para dar los promedios reales
 // de cada una (FootyStats, temporadas 2025): Premier 24,4 remates y 2,8 goles, LaLiga 25 y 2,6,
@@ -6467,9 +6467,9 @@ var ENGINE_EXPO_OFE = 1.5, ENGINE_EXPO_DEF = 0.7, ENGINE_EXPO_MIN = 0.6, ENGINE_
 var ENGINE_DEF_TILT = 0.85, ENGINE_DEF_PUSH = -3, ENGINE_DEF_SAFETY = 0.55;
 var ENGINE_TEAM_HEAT_MIN = 10, ENGINE_TEAM_HEAT_FREE = 1.0, ENGINE_TEAM_HEAT_K = 0.6;
 // cuántos de esos remates terminan adentro, en general (calibrado con temporadas completas)
-var ENGINE_FINISH = 1.5;
+var ENGINE_FINISH = 1.2;
 // pasa la calidad de la situación al xG que se muestra (calibrado: goles ≈ xG en una temporada)
-var ENGINE_XG_SCALE = 2.17;
+var ENGINE_XG_SCALE = 1.74;
 var SPEED_MULT = {normal:6.5, fast:32, keymoments:200};
 // los otros partidos, sin pantalla, avanzan en pasos más largos
 var ENGINE_HEADLESS_STEP = 1/5;
@@ -6578,8 +6578,9 @@ function engStat(side, key, n){
 }
 function engRate(pl, d){ var lm = engLM(); if(lm && pl) bumpRating(lm, pl.id, d); }
 
-// localía: con los cambios por cansancio el visitante se emparejaba al final, por eso pasó de 1.015 a 1.03
-var ENGINE_HOME_PERF = 1.03;
+// localía: con los cambios por cansancio el visitante se emparejaba al final, por eso pasó de 1.015 a 1.03;
+// en v61, con la conducción nueva, a 1.045 para volver al ~41% de victorias locales
+var ENGINE_HOME_PERF = 1.045;
 function animPerfFor(p, club, isHome){
   var mult = fitnessPerfMult(playerFitness(p));
   // fuera de su puesto rinde menos: no sabe dónde pararse
@@ -7046,6 +7047,7 @@ function animUpdateTargets(dt){
         return;
       }
       if(pl.runUntil>now){ pl.speed = ANIM_SPRINT*(pl.speedFactor||1); return; }
+      if(pl===ball.holder && !sp){ animCarryTarget(pl); return; }
       var flI = ball.flight;
       if(flI && !sp && flI.kind!=='shot' && (pl===flI.receiver || (pl===chaser[side] && (flI.kind==='long' || flI.kind==='clear') && flI.t > flI.dur*0.3))){
         var dI = animDist(pl.x, pl.y, flI.x2, flI.y2);
@@ -7058,6 +7060,45 @@ function animUpdateTargets(dt){
     });
   });
   if(now > (anim.markAt||0)) anim.markAt = now + 1.2;
+}
+// v61: el que tiene la pelota no vuelve a su puesto con ella en los pies: si tiene campo
+// adelante la sigue llevando (sin frenar en seco después de una corrida), si tiene un rival
+// encima la cuida, y si no hay hueco se queda mirando el pase
+var ENGINE_CARRY_SPEED = 1.15, ENGINE_CARRY_KEEP = 0.7, ENGINE_CARRY_SPACE = 14;
+function animSpaceAhead(pl){
+  var dir = pl.side==='home'? 1 : -1, best = 99, rv = animRival(pl.side);
+  for(var i=0;i<rv.length;i++){
+    var r = rv[i];
+    if(r.pos==='POR' || r.beatenUntil > anim.clock) continue;
+    var f = dir*(r.x-pl.x);
+    if(f < -1) continue;
+    if(Math.abs(r.y-pl.y) < Math.max(0, f)*0.8 + 3){ var d = animDist(r.x, r.y, pl.x, pl.y); if(d < best) best = d; }
+  }
+  return best;
+}
+function animCarryTarget(pl){
+  var dir = pl.side==='home'? 1 : -1, sf = pl.speedFactor||1;
+  var adv = animAdvance(pl.side, pl.x);
+  var near = animNearestRival(pl, pl.x, pl.y);
+  if(near.p && near.d < 4){
+    // la cuida: se perfila de espaldas al rival, casi sin moverse
+    var ax = pl.x-near.p.x, ay = pl.y-near.p.y, al = Math.sqrt(ax*ax+ay*ay) || 1;
+    pl.tx = clamp(pl.x + ax/al*1.2, 3, 97); pl.ty = clamp(pl.y + ay/al*1.2, 5, 95);
+    pl.speed = ANIM_WALK*sf;
+    return;
+  }
+  var space = animSpaceAhead(pl);
+  if(space > ENGINE_CARRY_SPACE && adv < 93){
+    // campo libre: la sigue llevando hacia el arco; el que venía lanzado no frena de golpe
+    var cur = Math.sqrt((pl.vx||0)*(pl.vx||0)+(pl.vy||0)*(pl.vy||0));
+    pl.tx = clamp(pl.x + dir*7, 3, 97);
+    pl.ty = clamp(pl.y + (adv>62? (50-pl.y)*0.3 : 0), 5, 95);
+    pl.speed = Math.max(ANIM_JOG*ENGINE_CARRY_SPEED*sf, Math.min(cur*ENGINE_CARRY_KEEP, ANIM_SPRINT*0.7*sf));
+    return;
+  }
+  // sin hueco adelante: frena y levanta la cabeza, pero no retrocede con la pelota
+  pl.tx = clamp(pl.x + dir*0.8, 3, 97); pl.ty = pl.y;
+  pl.speed = ANIM_WALK*sf;
 }
 // nadie arranca ni frena en seco: se acelera, se frena antes de llegar y los giros cuestan
 var ENGINE_ACCEL = 9, ENGINE_DECEL = 13;
@@ -7318,6 +7359,7 @@ function animPassCandidates(holder){
   var mates = animSide(holder.side);
   var dir = holder.side==='home'? 1 : -1;
   var vision = clamp(animAttr(holder,'cre')/60, 0.8, 1.3);
+  var backMul = animBackPassMul(holder, mates, dir);
   return mates.filter(function(m){ return m!==holder && m.pos!=='POR'; }).map(function(m){
     var d = animDist(holder.x, holder.y, m.x, m.y);
     var forward = dir*(m.x-holder.x);
@@ -7331,8 +7373,25 @@ function animPassCandidates(holder){
     // el que ve el juego elige al compañero libre; el que no, se la da al primero que encuentra
     w *= Math.pow(0.5 + Math.min(open, 16)/16, vision);
     if(animIsOffside(holder.side, m)) w *= 0.25/vision;
+    // v61: con la jugada para adelante no se la devuelve al de atrás sin motivo
+    if(forward < -3 && backMul < 1) w *= backMul;
     return {m:m, w:w, d:d};
   }).filter(function(c){ return c.w>0; });
+}
+// v61: cuánto pesa el pase para atrás. Sin presión y con un compañero libre adelante, poco;
+// de contra, casi nada. Con un rival encima sigue siendo la salida natural.
+var ENGINE_BACK_FREE = 0.35, ENGINE_BACK_COUNTER = 0.15, ENGINE_BACK_CALM = 0.7;
+function animBackPassMul(holder, mates, dir){
+  if(animPressureOn(holder) > 0) return 1;
+  var openAhead = false;
+  for(var i=0;i<mates.length;i++){
+    var m = mates[i];
+    if(m===holder || m.pos==='POR') continue;
+    if(dir*(m.x-holder.x) > 6 && animDist(m.x, m.y, holder.x, holder.y) < 36 && animNearestRival(holder, m.x, m.y).d > 7 && !animIsOffside(holder.side, m)){ openAhead = true; break; }
+  }
+  if(animOnCounter(holder.side)) return openAhead? ENGINE_BACK_COUNTER : ENGINE_BACK_COUNTER*2;
+  if(!openAhead) return 1;
+  return animAdvance(holder.side, holder.x) > 40? ENGINE_BACK_FREE : ENGINE_BACK_CALM;
 }
 function animPickWeighted(cands){
   var total = 0;
