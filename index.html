@@ -6434,7 +6434,7 @@ var ENGINE_FOUL_SHARE = 0.22;
 var ENGINE_STEP = 1/30;
 var ENGINE_HEADLESS = false;
 // cuántas ganas de patear tiene el que llega con la pelota a zona de remate (calibrado)
-var ENGINE_SHOT_EAGERNESS = 0.135;
+var ENGINE_SHOT_EAGERNESS = 0.30;   // v62: con la marca nueva hay menos situaciones regaladas (era 0.135)
 var ENGINE_HEAT_MIN = 15;
 // cada liga juega distinto: remates (shot) y puntería (fin) ajustados para dar los promedios reales
 // de cada una (FootyStats, temporadas 2025): Premier 24,4 remates y 2,8 goles, LaLiga 25 y 2,6,
@@ -6467,9 +6467,9 @@ var ENGINE_EXPO_OFE = 1.5, ENGINE_EXPO_DEF = 0.7, ENGINE_EXPO_MIN = 0.6, ENGINE_
 var ENGINE_DEF_TILT = 0.85, ENGINE_DEF_PUSH = -3, ENGINE_DEF_SAFETY = 0.55;
 var ENGINE_TEAM_HEAT_MIN = 10, ENGINE_TEAM_HEAT_FREE = 1.0, ENGINE_TEAM_HEAT_K = 0.6;
 // cuántos de esos remates terminan adentro, en general (calibrado con temporadas completas)
-var ENGINE_FINISH = 1.2;
+var ENGINE_FINISH = 1.27;
 // pasa la calidad de la situación al xG que se muestra (calibrado: goles ≈ xG en una temporada)
-var ENGINE_XG_SCALE = 1.74;
+var ENGINE_XG_SCALE = 1.90;
 var SPEED_MULT = {normal:6.5, fast:32, keymoments:200};
 // los otros partidos, sin pantalla, avanzan en pasos más largos
 var ENGINE_HEADLESS_STEP = 1/5;
@@ -6795,22 +6795,29 @@ function animIsOffside(side, m){
   return a > Math.max(animOffsideLine(side), animAdvance(side, anim.ball.x)) + 0.8;
 }
 // every so often each defender picks the rival he is responsible for
+// v62: se marca primero al más peligroso (el más cerca del arco propio), y cada línea toma a los
+// suyos: los defensores a los delanteros y a los que llegan al área, los volantes a los volantes.
+// Antes el lateral salía a marcar al volante o al lateral rival y dejaba solo al 9.
+var ENGINE_MARK_STEP = 9, ENGINE_MARK_DEF_HIGH = 22, ENGINE_MARK_DEL = 14, ENGINE_MARK_LANE = 0.5;
 function animAssignMarks(side){
   var markers = animSide(side).filter(function(p){ return p.pos!=='POR'; });
   var targets = animRival(side).filter(function(p){ return p.pos!=='POR'; }).slice();
+  var foe = animOther(side);
   markers.forEach(function(m){ m.markId = null; });
-  markers.sort(function(a,b){ return animAdvance(side,a.x)-animAdvance(side,b.x); });
-  markers.forEach(function(m){
-    if(!targets.length) return;
-    var best = null, bd = 1e9;
-    targets.forEach(function(t){
-      var d = animDist(m.x, m.y, t.x, t.y);
-      if(d<bd){ bd = d; best = t; }
+  // el rival más adelantado (desde su punto de vista) es el primero que hay que tomar
+  targets.sort(function(a,b){ return animAdvance(foe,b.x)-animAdvance(foe,a.x); });
+  var free = markers.slice();
+  targets.forEach(function(t){
+    if(!free.length) return;
+    var tAdv = animAdvance(foe, t.x), best = null, bc = 1e9;
+    free.forEach(function(m){
+      var c = animDist(m.x, m.y, t.x, t.y) + Math.abs(m.by - t.y)*ENGINE_MARK_LANE*0.3;
+      // el defensor no sale a buscar al que está lejos de su área: eso lo toma el medio
+      if(m.pos==='DEF' && tAdv < 55) c += ENGINE_MARK_DEF_HIGH;
+      if(m.pos==='DEL') c += ENGINE_MARK_DEL;
+      if(c < bc){ bc = c; best = m; }
     });
-    if(best && bd < 34){
-      m.markId = best.id;
-      targets.splice(targets.indexOf(best), 1);
-    }
+    if(best && bc < 34){ best.markId = t.id; free.splice(free.indexOf(best), 1); }
   });
 }
 // Each player decides for himself what to do next, on his own clock. This is what stops
@@ -6868,6 +6875,8 @@ function animIntentTarget(pl, ctx){
       var man = animRival(pl.side).filter(function(p){ return p.id===pl.markId; })[0];
       if(man){
         tx = man.x - dir*2.2; ty = man.y + pl.jitterY*0.25;
+        // el defensor acompaña hasta cierto punto: no deja la línea para seguir al que baja a pedirla
+        if(pl.pos==='DEF' && ctx.defLine!==null && dir*(tx-ctx.defLine) > ENGINE_MARK_STEP) tx = ctx.defLine + dir*ENGINE_MARK_STEP;
         speed = animDist(pl.x,pl.y,tx,ty)>7? ANIM_SPRINT : ANIM_JOG;
       } else { pl.intent='cover'; }
       break;
