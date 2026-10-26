@@ -66,7 +66,7 @@ a{ color:var(--phosphor); }
 
 .sidebar{ width:var(--sidebar-w); flex-shrink:0; background:var(--surface); border-right:1px solid var(--line); display:flex; flex-direction:column; padding:18px 14px; position:sticky; top:0; align-self:flex-start; height:100vh; overflow-y:auto; }
 .sidebar-brand{ display:flex; align-items:center; gap:9px; margin-bottom:18px; padding:0 2px; }
-.brand-mark{ width:28px; height:28px; border-radius:7px; background:linear-gradient(135deg,var(--phosphor),var(--phosphor-dim)); display:flex; align-items:center; justify-content:center; font-family:'Barlow Condensed',sans-serif; font-weight:700; font-size:14px; color:#06170e; flex-shrink:0; }
+.brand-mark{ width:30px; height:30px; border-radius:7px; overflow:hidden; display:flex; align-items:center; justify-content:center; font-family:'Barlow Condensed',sans-serif; font-weight:700; font-size:14px; color:#06170e; flex-shrink:0; }
 .wordmark{ font-family:'Barlow Condensed',sans-serif; font-size:21px; font-weight:700; letter-spacing:0.02em; color:var(--ink); }
 .sidebar-tools{ display:flex; gap:14px; margin-bottom:14px; padding:0 2px; }
 .sidebar-club{ display:flex; align-items:center; gap:10px; padding:10px; margin-bottom:16px; background:var(--surface-2); border-radius:var(--radius); border:1px solid var(--line); }
@@ -476,6 +476,7 @@ input[type="text"].search-input{ width:100%; margin:4px 0 6px; background:var(--
 /* v59: sonido del partido */
 .pitch-snd-toggle{ position:absolute; left:10px; bottom:10px; z-index:3; display:flex; align-items:center; gap:5px; font:600 11px/1 'Inter',sans-serif; color:rgba(255,255,255,0.85); background:rgba(12,15,20,0.72); border:1px solid rgba(255,255,255,0.18); border-radius:999px; padding:5px 10px 5px 8px; cursor:pointer; }
 .pitch-snd-toggle svg{ width:14px; height:14px; }
+.brand-mark svg{ width:100%; height:100%; display:block; }
 .pitch-snd-toggle.is-off{ color:rgba(255,255,255,0.55); }
 /* v59: muescas del iPhone en horizontal */
 .app-shell{ padding-left:env(safe-area-inset-left); padding-right:env(safe-area-inset-right); }
@@ -504,6 +505,39 @@ input[type="text"].search-input{ width:100%; margin:4px 0 6px; background:var(--
   .app-shell.is-live .live-header .chip-row{ flex-wrap:wrap; }
   .app-shell.is-live .live-assist{ margin-top:8px; padding:8px 10px; }
   .app-shell.is-live .live-assist-row{ flex-direction:column; align-items:stretch; }
+  /* jugando: pantalla fija, el partido al centro y el asistente al costado, sin scroll */
+  .app-shell.is-live-play .sidebar, .app-shell.is-live-play .view-grid > :not(.live-header){ display:none; }
+  .app-shell.is-live-play .live-header{ --sidew:clamp(230px, 32vw, 300px); --lpw:min(calc(100vw - var(--sidew) - 30px - env(safe-area-inset-left) - env(safe-area-inset-right)), calc((100vh - 52px) * 1.514)); --lpw:min(calc(100vw - var(--sidew) - 30px - env(safe-area-inset-left) - env(safe-area-inset-right)), calc((100dvh - 52px) * 1.514));
+    position:fixed; inset:0; z-index:40; margin:0; border:0; border-radius:0; overflow:hidden;
+    padding:6px max(8px, env(safe-area-inset-right)) 6px max(8px, env(safe-area-inset-left));
+    grid-template-columns:var(--lpw) minmax(0,1fr); grid-template-rows:auto auto minmax(0,1fr); grid-template-areas:"pitch side" "say side" ". side"; gap:6px 10px; align-items:stretch; }
+  .app-shell.is-live-play .live-header > .pitch-wrap{ grid-area:pitch; position:relative; top:auto; align-self:start; }
+  .app-shell.is-live-play .live-header > .live-scorebox{ grid-area:pitch; align-self:start; justify-self:center; z-index:5; margin-top:6px; display:flex; align-items:center; gap:8px; padding:3px 12px; border-radius:999px; background:rgba(12,15,20,0.82); border:1px solid rgba(255,255,255,0.14); max-width:calc(100% - 16px); }
+  .app-shell.is-live-play .live-scorebox .live-topline{ margin:0; flex-wrap:nowrap; gap:6px; }
+  .app-shell.is-live-play .live-scorebox .live-comp, .app-shell.is-live-play .live-scorebox .live-badge{ display:none; }
+  .app-shell.is-live-play .live-scorebox .score-line{ margin:0; font-size:13px; flex-wrap:nowrap; gap:6px; white-space:nowrap; min-width:0; }
+  .app-shell.is-live-play .live-scorebox .score-team{ gap:5px; min-width:0; }
+  .app-shell.is-live-play .live-scorebox .score-team svg{ width:18px; height:18px; }
+  .app-shell.is-live-play .live-scorebox .score-team > span{ overflow:hidden; text-overflow:ellipsis; max-width:11ch; }
+  .app-shell.is-live-play .live-scorebox .score-figure{ font-size:19px; }
+  .app-shell.is-live-play .live-header > .goal-flash{ grid-area:pitch; align-self:center; justify-self:center; z-index:5; font-size:30px; text-shadow:0 2px 10px rgba(0,0,0,0.8); pointer-events:none; }
+  .app-shell.is-live-play .live-header > .commentary-banner{ grid-area:say; margin:0; width:100%; max-width:none; }
+  .app-shell.is-live-play .live-header > .pitch-legend{ display:none; }
+  .app-shell.is-live-play .live-header > .live-side{ grid-area:side; display:flex; flex-direction:column; gap:6px; min-height:0; overflow:hidden; }
+  .app-shell.is-live-play .live-side > *{ display:none; }
+  .app-shell.is-live-play .live-side > .live-assist, .app-shell.is-live-play .live-side > .card-actions{ display:flex; }
+  .app-shell.is-live-play .live-side > .live-assist{ flex-direction:column; flex:1 1 auto; min-height:0; overflow-y:auto; margin:0; }
+  .app-shell.is-live-play .live-side > .card-actions{ flex:0 0 auto; flex-direction:column; align-items:stretch; gap:6px; margin:0; }
+  .app-shell.is-live-play .live-side > .card-actions .btn{ padding:8px 10px; font-size:13px; }
+  .app-shell.is-live-play .live-side .chip-row{ margin-top:0 !important; display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:4px; }
+  .app-shell.is-live-play .live-side .chip-btn{ min-width:0; padding:6px 3px; font-size:10.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .app-shell.is-live-play .live-side > .card-actions .btn{ width:100%; min-width:0; }
+  /* en pausa: el botón para seguir arriba de todo */
+  .app-shell.is-live:not(.is-live-play) .live-side{ display:flex; flex-direction:column; }
+  .app-shell.is-live:not(.is-live-play) .live-side > .card-actions{ order:-1; margin:0 0 8px; }
+  .app-shell.is-live-play .live-assist-text{ font-size:12.5px; }
+  .app-shell.is-live-play .live-assist-text .muted, .app-shell.is-live-play .live-assist .hint{ display:none; }
+  .app-shell.is-live-play .live-assist-row .btn{ width:100%; }
 }
 </style>
 <div id="root"></div>
@@ -5559,6 +5593,8 @@ function glossaryOverlayHTML(){
       rows+
     '</div></div>';
 }
+// v60: escudo del juego (pelota sobre la cancha)
+var ET_LOGO_SVG = '<svg aria-hidden="true" viewBox="0 0 64 64"><defs><linearGradient id="etLogoG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1f9a57"/><stop offset="1" stop-color="#0f5c35"/></linearGradient></defs><rect width="64" height="64" rx="14" fill="url(#etLogoG)"/><g fill="#000" opacity="0.10"><rect x="0" y="0" width="64" height="8"/><rect x="0" y="16" width="64" height="8"/><rect x="0" y="32" width="64" height="8"/><rect x="0" y="48" width="64" height="8"/></g><g fill="none" stroke="#fff" stroke-opacity="0.55" stroke-width="1.6"><line x1="0" y1="32" x2="64" y2="32"/><circle cx="32" cy="32" r="21"/><path d="M20 64v-9h24v9M20 0v9h24V0"/></g><circle cx="32" cy="32" r="15" fill="#fff"/><clipPath id="etLogoC"><circle cx="32" cy="32" r="15"/></clipPath><g clip-path="url(#etLogoC)" fill="#10141b" stroke="#10141b" stroke-width="0.75" stroke-linejoin="round"><polygon points="32.00,26.60 37.14,30.33 35.17,36.37 28.83,36.37 26.86,30.33"/><line x1="32.00" y1="26.60" x2="32.00" y2="21.20" fill="none"/><polygon points="37.66,24.21 35.60,17.87 40.99,13.95 46.39,17.87 44.33,24.21"/><line x1="32.00" y1="21.20" x2="39.58" y2="21.56" fill="none"/><line x1="42.27" y1="28.66" x2="39.58" y2="21.56" fill="none"/><line x1="37.14" y1="30.33" x2="42.27" y2="28.66" fill="none"/><polygon points="41.16,34.98 46.55,31.06 51.94,34.98 49.88,41.32 43.22,41.32"/><line x1="42.27" y1="28.66" x2="44.27" y2="35.99" fill="none"/><line x1="38.35" y1="40.74" x2="44.27" y2="35.99" fill="none"/><line x1="35.17" y1="36.37" x2="38.35" y2="40.74" fill="none"/><polygon points="32.00,41.63 37.39,45.55 35.33,51.89 28.67,51.89 26.61,45.55"/><line x1="38.35" y1="40.74" x2="32.00" y2="44.90" fill="none"/><line x1="25.65" y1="40.74" x2="32.00" y2="44.90" fill="none"/><line x1="28.83" y1="36.37" x2="25.65" y2="40.74" fill="none"/><polygon points="22.84,34.98 20.78,41.32 14.12,41.32 12.06,34.98 17.45,31.06"/><line x1="25.65" y1="40.74" x2="19.73" y2="35.99" fill="none"/><line x1="21.73" y1="28.66" x2="19.73" y2="35.99" fill="none"/><line x1="26.86" y1="30.33" x2="21.73" y2="28.66" fill="none"/><polygon points="26.34,24.21 19.67,24.21 17.61,17.87 23.01,13.95 28.40,17.87"/><line x1="21.73" y1="28.66" x2="24.42" y2="21.56" fill="none"/><line x1="32.00" y1="21.20" x2="24.42" y2="21.56" fill="none"/></g><circle cx="32" cy="32" r="14.55" fill="none" stroke="#10141b" stroke-width="0.9"/><circle cx="32" cy="32" r="15" fill="none" stroke="#e0a63e" stroke-width="1.6"/></svg>';
 function appShellHTML(){
   var myClub = getMyClub();
   if(!assistantVisible()) assistantOpen = false;
@@ -5578,9 +5614,9 @@ function appShellHTML(){
   var clubBlockHTML = myClub
     ? crestSVG(myClub,32)+'<div><div class="sidebar-club-name">'+escapeHtml(myClub.name)+'</div><div class="sidebar-club-league">'+(league?escapeHtml(league.name):'')+'</div></div>'
     : '<div class="sidebar-club-name">Sin club</div>';
-  return '<div class="app-shell'+(currentView==='partido' && state.liveMatch? ' is-live' : '')+'">'+
+  return '<div class="app-shell'+(currentView==='partido' && state.liveMatch? ' is-live'+(state.liveMatch.status==='playing'? ' is-live-play' : '') : '')+'">'+
     '<aside class="sidebar">'+
-      '<div class="sidebar-brand"><span class="brand-mark">ET</span><span class="wordmark">El Técnico</span></div>'+
+      '<div class="sidebar-brand"><span class="brand-mark">'+ET_LOGO_SVG+'</span><span class="wordmark">El Técnico</span></div>'+
       '<div class="sidebar-tools">'+
         '<button class="link-btn" data-action="open-search" type="button">Buscar</button>'+
         '<button class="link-btn" data-action="open-glossary" type="button">Glosario</button>'+
@@ -8626,11 +8662,12 @@ function renderLiveMatch(){
     '<h2 class="score-line"><span class="score-team">'+crestSVG(homeClub,28)+'<span>'+escapeHtml(lm.homeName)+'</span></span><span class="score-figure mono">'+shownScore.h+' - '+shownScore.a+'</span><span class="score-team">'+crestSVG(awayClub,28)+'<span>'+escapeHtml(lm.awayName)+'</span></span></h2></div>'+
     flashHTML+
     renderPitchSVG(lm, homeClub, awayClub)+
+    '<div class="live-side">'+
     (isPaused? '' : liveAssistHTML(lm))+
     renderCompactMatchStats(lm)+renderPossessionBar(lm)+renderMomentumBar(lm)+
     '<p class="feature-line muted">Cambios: '+lm.mySubsUsed+'/5 · Ventanas usadas: '+lm.subWindowsUsed+'/3 (el entretiempo no cuenta como ventana)</p>'+
     subHintHTML+
-    '<div class="card-actions">'+controlsHTML+'</div>'+(isPaused? '' : liveShoutsHTML(lm))+'</div>';
+    '<div class="card-actions">'+controlsHTML+'</div>'+(isPaused? '' : liveShoutsHTML(lm))+'</div></div>';
 
   var shownEvents = liveShownEvents(lm);
   var highlightsCard = '<div class="card"><p class="eyebrow">Mejores jugadas</p><ul class="event-log">'+renderHighlights(shownEvents, lm.homeName, lm.awayName)+'</ul></div>';
